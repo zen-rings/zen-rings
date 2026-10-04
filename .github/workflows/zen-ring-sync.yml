@@ -158,7 +158,10 @@ jobs:
             if [ "$MODE" = "disable" ]; then
               jq -c '{repo, enabled:false}' <<<"$row" > /tmp/body.json
             else
-              jq -c '{repo, location:(.location // ""), enabled:true}
+              # `enabled` comes from the row: the registry carries switched-off rows too, and
+              # mode=register must not silently put one back in the ring (that is exactly how a repo
+              # with no zen-run trigger got re-enabled on the first cf run).
+              jq -c '{repo, location:(.location // ""), enabled:(.enabled // true)}
                      + (if .token then {token:.token} else {} end)
                      + (if .token_ref then {token_ref:.token_ref} else {} end)' <<<"$row" > /tmp/body.json
             fi
