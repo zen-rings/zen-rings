@@ -249,16 +249,19 @@ test('stop: POST /zen/pool/stop makes the next pull say bye, so the job exits in
   assert.equal(bye.reason, 'stop_requested');
 });
 
-test('quarantine and budget are enforced on the warm path too', async () => {
+test('an explicit call is NOT blocked by the quarantine — only the budget is', async () => {
+  // The quarantine answers "should we probe this model on a schedule", not "a caller named it
+  // explicitly". Blocking the second call to a model that just answered is what made the live
+  // smoke fail: one success put the model in `skip` for 6h and the pool refused the next call.
   const d1 = fakeD1({ models: [{ model: 'jev-1.13-free', status: 'down', failures: 5, next_check_at: NOW + 3_600_000 }] });
   const reg = await post('/zen/pool/register', { worker_id: 'LLM-test:4:1' }, d1);
   const lease = await reg.json();
   await get(`/zen/pool/pull?lease=${lease.lease_id}&hold_ms=5000`, d1);
-  const q = await post('/zen/pool/invoke', { model: 'jev-1.13-free', prompt: 'x' }, d1);
-  assert.equal(q.status, 409);
-  assert.match((await q.json()).error, /quarantine/);
+  const q = await post('/zen/pool/invoke', { model: 'jev-1.13-free', prompt: 'x', wait_ms: 1000 }, d1);
+  assert.equal(q.status, 504);   // accepted and waiting — NOT 409
 
   const full = fakeD1({ budget: [{ scope: '*', model: '*', minute_count: 50, minute_at: NOW, day_count: 1, day: '2026-10-04' }] });
+
   const reg2 = await post('/zen/pool/register', { worker_id: 'LLM-test:5:1' }, full);
   await get(`/zen/pool/pull?lease=${(await reg2.json()).lease_id}&hold_ms=5000`, full);
   const b = await post('/zen/pool/invoke', { model: 'nemotron-3.5-lightning-free', prompt: 'x' }, full);

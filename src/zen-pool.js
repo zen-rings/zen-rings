@@ -249,11 +249,11 @@ export async function zenPoolInvoke(request, env) {
   const maxTokens = Math.min(Math.max(Number(body.max_tokens) || 300, 1), 4096);
   const now = nowMs(env);
 
-  const state = await readModel(env, model);
-  if (state && state.next_check_at > now) {
-    return j(409, { error: 'model is in quarantine', status: state.status, next_check_at: state.next_check_at,
-      retry_after: state.next_check_at - now });
-  }
+  // Deliberately NO quarantine check here. The quarantine table answers "should we go and PROBE this
+  // model on a schedule" — it exists so the self-test stops poking a dead provider 100 times. It
+  // must not answer "a caller named this model explicitly and wants an answer": that is the whole
+  // point of the pool, and the budget below is the real protection. The result is still recorded
+  // (applyReport below), so an explicit call is also the cheapest possible re-check.
   const workers = await readLiveWorkers(env, now);
   if (!workers.length) {
     return j(503, { error: 'no warm runner', hint: 'dispatch zen-pool.yml in a ring repository, or use POST /zen/run for a cold dispatch' });
