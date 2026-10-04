@@ -252,7 +252,9 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
   if (request.method === 'GET' && url.pathname === '/zen/pool/pull') return pool.zenPoolPull(request, env);
   if (request.method === 'POST' && url.pathname === '/zen/pool/result') return pool.zenPoolResult(request, env);
   if (request.method === 'POST' && url.pathname === '/zen/pool/stop') return pool.zenPoolStop(request, env);
-  if (request.method === 'POST' && url.pathname === '/zen/pool/invoke') return pool.zenPoolInvoke(request, env);
+  if (request.method === 'POST' && url.pathname === '/zen/pool/invoke') return pool.zenPoolInvoke(request, env, fetchImpl);
+  if (request.method === 'GET' && url.pathname === '/zen/pool/metrics') return pool.zenPoolMetrics(request, env);
+  if (request.method === 'POST' && url.pathname === '/zen/pool/scale') return pool.zenPoolScale(request, env, fetchImpl);
   const mResult = /^\/zen\/pool\/result\/([A-Za-z0-9._-]{1,80})$/.exec(url.pathname);
   if (request.method === 'GET' && mResult) return pool.zenPoolResultById(request, env, mResult[1]);
   if (!authorized(request, env)) return oaError(401, 'unauthorized', 'auth_error');

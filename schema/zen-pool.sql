@@ -56,3 +56,19 @@ CREATE TABLE IF NOT EXISTS zen_pool_tasks (
 );
 CREATE INDEX IF NOT EXISTS zen_pool_tasks_queued ON zen_pool_tasks(state, enqueued_at);
 CREATE INDEX IF NOT EXISTS zen_pool_tasks_worker ON zen_pool_tasks(worker_id, claimed_at);
+-- λ is measured as "arrivals in the last window", i.e. a count of rows by enqueued_at. This index
+-- is what keeps that count cheap enough to run on every invoke.
+CREATE INDEX IF NOT EXISTS zen_pool_tasks_enqueued ON zen_pool_tasks(enqueued_at);
+
+-- One row per pool worker the autoscaler dispatched. It exists so "in flight" is a fact and not a
+-- guess: a dispatched worker needs ~10-13 s to boot, and until it registers the queue must not
+-- trigger a second dispatch for the same task. `state` is informational (dispatched | registered).
+CREATE TABLE IF NOT EXISTS zen_pool_dispatches (
+  id TEXT PRIMARY KEY,
+  repo TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  requested_at INTEGER NOT NULL DEFAULT 0,
+  worker_id TEXT,
+  state TEXT NOT NULL DEFAULT 'dispatched'
+);
+CREATE INDEX IF NOT EXISTS zen_pool_dispatches_requested ON zen_pool_dispatches(requested_at);

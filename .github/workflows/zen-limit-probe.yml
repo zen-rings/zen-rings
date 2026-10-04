@@ -20,6 +20,9 @@ on:
       model_after:
         description: 'fire one request at this model right after the first 429 (shared-bucket test)'
         default: ''
+      same_ip:
+        description: 'true = shard 1 fires both streams inside ONE job (one egress IP): the same-IP sharing test'
+        default: 'false'
       delay_ms:
         description: 'delay between request starts per worker'
         default: '0'
@@ -40,15 +43,27 @@ jobs:
         shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
+      # The free tier is metered per (egress IP, model), so the IP is part of every result: two
+      # shards that land on the same IP share one budget, two on different IPs do not.
+      - name: record egress ip
+        run: |
+          IP=$(curl -s --max-time 10 https://api.ipify.org || echo unknown)
+          echo "EGRESS_IP=$IP" >> "$GITHUB_ENV"
+          echo "POOL egress_ip runner=${{ matrix.shard }} ip=$IP" >> "$GITHUB_STEP_SUMMARY"
       - name: zen probe from runner ${{ matrix.shard }}
         run: |
+          # same_ip: shard 1 fires BOTH streams in this one job, so they share this job's egress
+          # IP. If the free-tier budget is per IP, the pair trips it at ~half the requests of a
+          # single stream; if it is per stream, the pair gets double.
+          CONC="${{ inputs.concurrency }}"
+          if [ "${{ inputs.same_ip }}" = "true" ] && [ "${{ matrix.shard }}" = "1" ]; then CONC=2; fi
           MODEL_AFTER_ARG=""
           if [ -n "${{ inputs.model_after }}" ]; then MODEL_AFTER_ARG="--model-after ${{ inputs.model_after }}"; fi
           FILL_ARG=""
           if [ -n "${{ inputs.fill_tokens }}" ]; then FILL_ARG="--fill-tokens ${{ inputs.fill_tokens }}"; fi
           node scripts/zen-limit-probe.mjs \
             --requests ${{ inputs.requests }} \
-            --concurrency ${{ inputs.concurrency }} \
+            --concurrency "$CONC" \
             --model ${{ inputs.model }} \
             --prompt "${{ inputs.prompt }}" \
             --max-tokens ${{ inputs.max_tokens }} \
