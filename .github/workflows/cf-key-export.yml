@@ -8,10 +8,17 @@ jobs:
       T: ${{ secrets.CF_API_TOKEN }}
       ACC: d740a05e9442c1d0feacae2dfc673e93
     steps:
-      - name: perms
+      - name: probe
         run: |
           H="Authorization: Bearer $T"
-          echo "PAGES:  $(curl -s -o /tmp/p -w '%{http_code}' -H "$H" "https://api.cloudflare.com/client/v4/accounts/$ACC/pages/projects") $(jq -c '[.result[]?.name]' /tmp/p 2>/dev/null) $(jq -c '.errors' /tmp/p)"
-          echo "WORKERS: $(curl -s -o /tmp/w -w '%{http_code}' -H "$H" "https://api.cloudflare.com/client/v4/accounts/$ACC/workers/scripts") $(jq -c '[.result[]?.id]' /tmp/w 2>/dev/null) $(jq -c '.errors' /tmp/w)"
-          echo "ACCTOK: $(curl -s -o /tmp/a -w '%{http_code}' -H "$H" "https://api.cloudflare.com/client/v4/accounts/$ACC/tokens") $(jq -c '.errors' /tmp/a)"
-          echo "ZONES:  $(curl -s -o /tmp/z -w '%{http_code}' -H "$H" "https://api.cloudflare.com/client/v4/zones") $(jq -c '.result|length' /tmp/z) $(jq -c '.errors' /tmp/z)"
+          curl -s -o /tmp/g -w 'groups_http=%{http_code}\n' -H "$H" "https://api.cloudflare.com/client/v4/accounts/$ACC/tokens/permission_groups"
+          jq -c '{success, groups: [.result[]? | select(.name|test("Pages|Workers Scripts|KV Storage|Tail|D1")) | {id,name}], err: .errors}' /tmp/g | head -c 3000
+      - name: create
+        run: |
+          H="Authorization: Bearer $T"
+          G=$(jq -c '[.result[]? | select(.name|test("Pages Edit|Workers Scripts Edit|KV Storage Edit|Tail Read|D1 Edit")) | .id]' /tmp/g)
+          echo "ids=$G"
+          POLICY=$(jq -nc --arg acct "$ACC" --argjson g "$G" '{effect:"allow",resources:{("com.cloudflare.api.account."+$acct):"*"},permission_groups:[$g[]|{id:.}]}')
+          BODY=$(jq -nc --argjson p "$POLICY" '{name:"ladder-key-2026-10-05",policies:[$p]}')
+          curl -s -o /tmp/c -w 'create_http=%{http_code}\n' -X POST -H "$H" -H "Content-Type: application/json" -d "$BODY" "https://api.cloudflare.com/client/v4/accounts/$ACC/tokens"
+          jq -r '"success=" + (.success|tostring), (.result.value // (.errors|tostring))' /tmp/c
