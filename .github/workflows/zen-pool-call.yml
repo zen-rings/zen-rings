@@ -1,0 +1,74 @@
+name: zen-pool-call
+# The caller, as an operator console: one dispatch, one answer, printed here.
+#
+# Nothing in the pool needs to know about this workflow — it is exactly what any other client does
+# (a script with ZEN_RUNNER_TOKEN). It exists so the pool can be driven from the GitHub UI without
+# handing the controller token to a human, and so a call can be reproduced later from the log.
+#
+# `wait_ms` is the caller's watchdog: how long we are willing to wait for the answer. The default
+# below is the pool's own default (30 s) — pass a smaller number to watch the 504 path.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'model id, e.g. nemotron-3.5-lightning-free'
+        default: 'nemotron-3.5-lightning-free'
+      prompt:
+        description: 'prompt'
+        default: 'Answer in one short sentence: what is 2+4?'
+      wait_ms:
+        description: 'how long we are willing to wait for the answer'
+        default: '30000'
+      follow:
+        description: 'after a watchdog timeout, keep asking for the answer this many seconds'
+        default: '0'
+
+concurrency:
+  group: zen-pool-call
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  call:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: check node
+        id: nodecheck
+        run: |
+          if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge 22 ]; then
+            echo "need_setup=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "need_setup=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v4
+        if: steps.nodecheck.outputs.need_setup == 'true'
+        with:
+          node-version: 22
+      - name: call the pool
+        id: call
+        env:
+          ZEN_RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
+          ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
+        run: |
+          set -uo pipefail
+          node scripts/zen-pool-call.mjs \
+            --model "${{ inputs.model }}" \
+            --prompt "${{ inputs.prompt }}" \
+            --wait-ms "${{ inputs.wait_ms }}" \
+            --follow "${{ inputs.follow }}" | tee call.log
+          RC=${PIPESTATUS[0]}
+          echo "rc=$RC" >> "$GITHUB_OUTPUT"
+          exit $RC
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo '```'
+            grep -E '^CALL_(POOL|STATUS|TEXT|RESULT|PENDING|WATCHDOG)' call.log || cat call.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

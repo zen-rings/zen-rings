@@ -167,13 +167,13 @@ export async function resolveToken(row, env) {
 const db = (env) => env.ZEN_DB;
 const nowMs = (env) => Number(env.ZEN_NOW_MS) || Date.now();
 
-async function readCounts(env, scope, model) {
+export async function readCounts(env, scope, model) {
   const row = await db(env).prepare('SELECT * FROM zen_budget WHERE scope = ?1 AND model = ?2')
     .bind(scope, model).first();
   return row || { scope, model, minute_count: 0, minute_at: 0, day_count: 0, day: '' };
 }
 
-async function bumpCount(env, scope, model, now) {
+export async function bumpCount(env, scope, model, now) {
   const day = utcDay(now);
   // One statement: reset the rolling minute if the window expired, reset the day if the date
   // changed, then increment. Doing it in JS first would race two concurrent dispatches.
@@ -188,11 +188,11 @@ async function bumpCount(env, scope, model, now) {
   ).bind(scope, model, now, day).run();
 }
 
-async function readModel(env, model) {
+export async function readModel(env, model) {
   return await db(env).prepare('SELECT * FROM zen_models WHERE model = ?1').bind(model).first();
 }
 
-async function writeModel(env, model, state) {
+export async function writeModel(env, model, state) {
   await db(env).prepare(
     `INSERT INTO zen_models (model, status, failures, successes, last_error, last_error_kind, last_ok_at, first_failed_at, next_check_at, updated_at)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -204,7 +204,7 @@ async function writeModel(env, model, state) {
 
 const runId = (env) => `${nowMs(env).toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
 
-async function authorized(request, env) {
+export async function authorized(request, env) {
   const want = env.ZEN_RUNNER_TOKEN;
   if (!want) return { ok: false, status: 503, reason: 'controller not configured (ZEN_RUNNER_TOKEN missing)' };
   const got = bearer(request);

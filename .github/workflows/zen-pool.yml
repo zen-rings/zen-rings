@@ -1,0 +1,104 @@
+name: zen-pool
+# Zen Pool — ONE long-lived GitHub Actions run that serves many inference calls.
+#
+# Why this workflow exists: a dispatched run is not an API. Nothing about a GitHub-hosted runner
+# is reachable from the outside (no inbound address, no port, no URL at dispatch time), so the
+# direction is inverted on purpose — this run registers itself with the ladder worker and then
+# holds a long-poll open. The caller POSTs /zen/pool/invoke and gets the answer inside the same
+# HTTP request. One boot (~10-13 s measured) amortises over every call that follows.
+#
+# Lifecycle: workflow_dispatch (an operator, or the controller scaling up) -> register -> pull
+# loop -> exit 0 on idle TTL or on POST /zen/pool/stop. `max-tasks` bounds a test run so it can
+# prove "many calls, one job" and then finish by itself.
+
+on:
+  workflow_dispatch:
+    inputs:
+      idle_exit:
+        description: 'exit after this many ms without work'
+        default: '600000'
+      max_tasks:
+        description: 'stop after N tasks (0 = only idle/stop)'
+        default: '0'
+      out:
+        description: 'where to write the last answer'
+        default: 'zen-pool-last.json'
+  # The controller scales the pool up by dispatching here; client_payload carries the same knobs.
+  repository_dispatch:
+    types: [zen-pool]
+
+# Two pool jobs must never cancel each other: each one is a live service with its own lease.
+concurrency:
+  group: zen-pool
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  pool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: mark job start
+        run: echo "POOL job_start $(date -u +%FT%TZ) runner=${RUNNER_NAME} os=${RUNNER_OS}" >> pool.log
+
+      - uses: actions/checkout@v4
+      - name: mark checkout
+        run: echo "POOL checkout_done $(date -u +%FT%TZ)" >> pool.log
+
+      # The GitHub image already ships Node; setup-node only runs when what is there is too old.
+      - name: check node
+        id: nodecheck
+        run: |
+          echo "POOL node_check $(date -u +%FT%TZ) have=$(node -v 2>/dev/null || echo none)" >> pool.log
+          if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge 22 ]; then
+            echo "need_setup=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "need_setup=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.nodecheck.outputs.need_setup == 'true'
+        with:
+          node-version: 22
+
+      # The free tier is metered per (egress IP, model), so the IP is part of the result.
+      - name: record egress ip
+        run: echo "ZEN_EGRESS_IP=$(curl -s --max-time 10 https://api.ipify.org || echo unknown)" >> "$GITHUB_ENV"
+
+      - name: serve
+        id: serve
+        env:
+          ZEN_RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
+          ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
+          ZEN_POOL_REPO: ${{ github.repository }}
+          ZEN_DAILY_BUDGET: ${{ vars.ZEN_DAILY_BUDGET || '500' }}
+        run: |
+          set -uo pipefail
+          IDLE="${{ inputs.idle_exit || github.event.client_payload.idle_exit || '600000' }}"
+          MAXT="${{ inputs.max_tasks || github.event.client_payload.max_tasks || '0' }}"
+          OUT="${{ inputs.out || github.event.client_payload.out || 'zen-pool-last.json' }}"
+          echo "POOL serve_step $(date -u +%FT%TZ) idle_exit=$IDLE max_tasks=$MAXT" >> pool.log
+          node scripts/zen-pool-worker.mjs --idle-exit "$IDLE" --max-tasks "$MAXT" --out "$OUT"
+          RC=$?
+          echo "POOL serve_done $(date -u +%FT%TZ) rc=$RC" >> pool.log
+          exit $RC
+
+      - name: boot summary
+        if: always()
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo 'pool marks (job start is the caller'"'"'s own clock)' >> "$GITHUB_STEP_SUMMARY"
+          cat pool.log >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat pool.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zen-pool-${{ github.run_id }}
+          path: |
+            zen-pool-last.json
+            pool.log
+          retention-days: 30

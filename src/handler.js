@@ -5,6 +5,7 @@
 import { run, readPool, fetchGoUsage, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppTitle } from './ladder.js';
 import { makeTrace, logCall } from './trace.js';
 import * as zen from './zen-runner.js';
+import * as pool from './zen-pool.js';
 import config from '../config/ladders.json' with { type: 'json' };
 import prices from '../config/prices.json' with { type: 'json' };
 
@@ -244,6 +245,15 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
   if (request.method === 'POST' && url.pathname === '/zen/run') return zen.zenRun(request, env, fetchImpl);
   if (request.method === 'POST' && url.pathname === '/zen/report') return zen.zenReport(request, env);
   if (request.method === 'POST' && url.pathname === '/zen/repos') return zen.zenRepos(request, env);
+  // Zen Pool — a long-lived job as an API. Same token, same placement, before the ladder gate.
+  if (request.method === 'GET' && url.pathname === '/zen/pool/health') return pool.zenPoolHealth(request, env);
+  if (request.method === 'POST' && url.pathname === '/zen/pool/register') return pool.zenPoolRegister(request, env);
+  if (request.method === 'GET' && url.pathname === '/zen/pool/pull') return pool.zenPoolPull(request, env);
+  if (request.method === 'POST' && url.pathname === '/zen/pool/result') return pool.zenPoolResult(request, env);
+  if (request.method === 'POST' && url.pathname === '/zen/pool/stop') return pool.zenPoolStop(request, env);
+  if (request.method === 'POST' && url.pathname === '/zen/pool/invoke') return pool.zenPoolInvoke(request, env);
+  const mResult = /^\/zen\/pool\/result\/([A-Za-z0-9._-]{1,80})$/.exec(url.pathname);
+  if (request.method === 'GET' && mResult) return pool.zenPoolResultById(request, env, mResult[1]);
   if (!authorized(request, env)) return oaError(401, 'unauthorized', 'auth_error');
 
   if (request.method === 'GET' && url.pathname === '/v1/models') {
