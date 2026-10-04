@@ -32,15 +32,21 @@ console.log(`SCALE repo=${repo} λ=${m.lambda_per_min}/min (n=${m.lambda_count} 
   + `queued=${m.queued} live=${m.workers_live} inflight=${m.inflight} desired=${m.desired} `
   + `toDispatch=${m.toDispatch} ceiling=${m.ceiling} reserve=${m.reserve} ttl=${Math.round(m.ttl_ms / 60000)}min reason=${m.reason}`);
 
-if (m.toDispatch <= 0) {
+// `force` is the operator escape hatch and the only path that works with an EMPTY registry:
+// the hub can only boot a worker in a repo it holds a token for, while this workflow already has
+// a token for its own repository. So a forced run skips the verdict and simply adds itself.
+const force = String(process.env.SCALE_FORCE || '').toLowerCase() === 'true';
+if (!force && m.toDispatch <= 0) {
   console.log('SCALE at_target');
   process.exit(0);
 }
+if (force) console.log(`SCALE forced=true (verdict was toDispatch=${m.toDispatch}) — dispatching anyway`);
 if (!ghToken) {
   console.log('SCALE_NO_GITHUB_TOKEN — the workflow needs actions: write to dispatch zen-pool.yml');
   process.exit(3);
 }
 
+const idleExit = Number(process.env.SCALE_IDLE_EXIT_MS || 0) || m.ttl_ms;
 const started = Date.now();
 const d = await fetch(`https://api.github.com/repos/${repo}/dispatches`, {
   method: 'POST',
@@ -48,7 +54,7 @@ const d = await fetch(`https://api.github.com/repos/${repo}/dispatches`, {
     accept: 'application/vnd.github+json', 'user-agent': 'trained-assist-llm-ladder' },
   body: JSON.stringify({ event_type: 'zen-pool', client_payload: {
     run_id: `scale-${started.toString(36)}`,
-    idle_exit_ms: m.ttl_ms,
+    idle_exit_ms: idleExit,
     max_tasks: 0,
     out: 'zen-pool-last.json',
     requested_at: new Date(started).toISOString(),
@@ -56,5 +62,5 @@ const d = await fetch(`https://api.github.com/repos/${repo}/dispatches`, {
   } }),
   signal: AbortSignal.timeout(15_000),
 });
-console.log(`SCALE dispatched=${d.status} repo=${repo} idle_exit_ms=${m.ttl_ms} toDispatch=${m.toDispatch}`);
+console.log(`SCALE dispatched=${d.status} repo=${repo} idle_exit_ms=${idleExit} toDispatch=${m.toDispatch}`);
 if (!d.ok) process.exit(2);
