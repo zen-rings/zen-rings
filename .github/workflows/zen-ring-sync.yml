@@ -1,29 +1,19 @@
 name: zen-ring-sync
 # Zen Pool ring — provision ring repositories and (re)register their rows in the pool registry.
 #
-# Where "which repositories are in the ring and with which token" lives: the `zen_repos` table in the
-# worker's own D1 database. This workflow asks the worker for that list (`GET /zen/ring/payload`) and
-# writes nothing secret of its own — there is no ring payload in GitHub secrets and no spreadsheet
-# behind it. The worker and the provisioner read the same row, so they cannot drift apart.
+# One place where "which repositories are in the ring and with which token" lives: the JSON payload
+# in the ZEN_RING_PAYLOAD secret. Nothing about a token is ever printed or passed as a workflow
+# input — a public repository's dispatch inputs and logs are readable by anyone.
 #
-# Two tokens, deliberately not one:
-#   ZEN_RUNNER_TOKEN      the low-privilege one, provisioned into every ring repo (call models, report);
-#   ZEN_RING_ADMIN_TOKEN  never leaves this repo + the owner's terminal; reads the registry and the
-#                         plaintext tokens. A ring member must not be able to read the ring.
-#
-# Payload rows look like:
-#   { "repo": "owner/name", "location": "eu", "token": "ghp_…" }        — token stored encrypted
-#   { "repo": "owner/name", "token_ref": "env:NAME" }                   — token lives in a worker secret
-#   { "repo": "owner/name", "enabled": false }                         — switched off, row kept
-# A row with neither `token` nor `token_ref` keeps whatever the registry already has for that repo.
+# Payload = JSON array, one object per ring member:
+#   [{ "repo": "owner/name", "location": "eu", "token": "ghp_…" | "token_ref": "env:NAME" }]
+# `token` is stored by the worker encrypted (ZEN_TOKEN_KEY); `token_ref` keeps the GitHub token in a
+# worker secret instead. A row without either keeps whatever the registry already has for that repo.
 #
 # Provisioning writes into each ring repo: .github/workflows/zen-pool.yml, scripts/zen-pool-worker.mjs,
 # scripts/zen-client.mjs, the ZEN_RUNNER_URL variable and the ZEN_RUNNER_TOKEN secret — i.e. exactly
-# what a pool worker needs to boot.
-#
-# This repository is public: Actions inputs and logs are readable by anyone. No token is ever passed as
-# an input, printed, or echoed; every token read from the registry is `add-mask`ed before anything can
-# print it.
+# what a pool worker needs to boot. Each row's own `token` is used for that write path (per-repo
+# ring); GH_RING_ADMIN_PAT is only the fallback for a row that carries no token.
 
 on:
   workflow_dispatch:
@@ -33,15 +23,6 @@ on:
         type: choice
         options: [register, disable, list]
         default: register
-      source:
-        description: 'cf = read the ring from the worker registry (default); gh-secret = the legacy payload secret'
-        type: choice
-        options: [cf, gh-secret]
-        default: cf
-      import:
-        description: 'before anything else: upsert the source rows into the worker registry (one-off migration)'
-        type: boolean
-        default: false
       provision:
         description: 'write the worker files/vars/secrets into each ring repo before registering'
         type: boolean
@@ -57,55 +38,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: read ring rows
+      - name: read ring payload
+        id: payload
         env:
-          BASE: ${{ vars.ZEN_RUNNER_URL }}
-          SOURCE: ${{ inputs.source }}
-          RING_ADMIN: ${{ secrets.ZEN_RING_ADMIN_TOKEN }}
           RING_PAYLOAD: ${{ secrets.ZEN_RING_PAYLOAD }}
         run: |
           set -euo pipefail
-          umask 077
           mkdir -p .ring
-          if [ "$SOURCE" = "cf" ]; then
-            code=$(curl -sS -o .ring/payload.json -w '%{http_code}' \
-              -H "authorization: Bearer $RING_ADMIN" -H 'accept: application/json' "$BASE/zen/ring/payload")
-            if [ "$code" != "200" ]; then
-              echo "::error::the ring registry did not answer ($code): $(jq -r '.error // "no detail"' .ring/payload.json 2>/dev/null || echo unreadable)"
-              echo "::error::the ring lives in the worker's D1 now — fix ZEN_RING_ADMIN_TOKEN in this repo, or run with source=gh-secret once to import."
-              exit 1
-            fi
-            jq -c '.repos' .ring/payload.json > .ring/ring.json
-          else
+          if [ -n "${RING_PAYLOAD:-}" ]; then
             printf '%s' "$RING_PAYLOAD" > .ring/ring.json
+          else
+            printf '[]' > .ring/ring.json
           fi
-          node -e 'const a=JSON.parse(require("fs").readFileSync(".ring/ring.json","utf8")); if(!Array.isArray(a)||!a.length) throw new Error("ring rows are not a non-empty JSON array"); for (const r of a) if(!/^[\w.-]+\/[\w.-]+$/.test(r.repo||"")) throw new Error("bad repo: "+r.repo); console.log("RING_ROWS="+a.length)'
-          # Mask every token before any later command could print one. A token fetched at runtime is
-          # NOT masked by GitHub on its own — only secrets are.
-          jq -r '.[] | (.token // empty), (.resolved_token // empty)' .ring/ring.json | while IFS= read -r t; do
-            if [ -n "$t" ]; then echo "::add-mask::$t"; fi
-          done
-
-      - name: import rows into the registry
-        if: ${{ inputs.import }}
-        env:
-          BASE: ${{ vars.ZEN_RUNNER_URL }}
-          RING_ADMIN: ${{ secrets.ZEN_RING_ADMIN_TOKEN }}
-        run: |
-          set -euo pipefail
-          jq -c '.[]' .ring/ring.json | while read -r row; do
-            repo=$(jq -r '.repo' <<<"$row")
-            jq -c '{repo, location:(.location // "")}
-                   + (if .token then {token:.token} else {} end)
-                   + (if .token_ref then {token_ref:.token_ref} else {} end)' <<<"$row" > /tmp/body.json
-            code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST "$BASE/zen/repos" \
-              -H "authorization: Bearer $RING_ADMIN" -H 'content-type: application/json' --data @/tmp/body.json)
-            echo "import $repo http=$code $(jq -r '.error // "ok"' /tmp/resp.json 2>/dev/null || echo ok)"
-          done
+          node -e 'const a=JSON.parse(require("fs").readFileSync(".ring/ring.json","utf8")); if(!Array.isArray(a)||!a.length) throw new Error("payload is not a non-empty JSON array"); for (const r of a) if(!/^[\w.-]+\/[\w.-]+$/.test(r.repo||"")) throw new Error("bad repo: "+r.repo); console.log("RING_ROWS="+a.length)'
 
       - name: provision ring repositories
         if: ${{ inputs.provision }}
         env:
+          ADMIN_PAT: ${{ secrets.GH_RING_ADMIN_PAT }}
           RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
           RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
           DAILY_BUDGET: '8000'
@@ -114,16 +64,18 @@ jobs:
           umask 077
           printf '%s' "$RUNNER_TOKEN" > /tmp/runner-token
           # Each row carries its own token: the ring is per-repo, so provisioning must be too.
-          # An `env:NAME` row has no `token` of its own — the worker hands over `resolved_token` for
-          # exactly this step (and never writes it back, so the reference stays rotatable).
+          # A row without a token falls back to GH_RING_ADMIN_PAT (kept for the legacy path).
           jq -c '.[]' .ring/ring.json | while read -r row; do
             repo=$(jq -r '.repo' <<<"$row")
-            pat=$(jq -r '.token // .resolved_token // empty' <<<"$row")
-            if [ -z "$pat" ]; then echo "provision $repo skipped — the registry has no token for this row"; continue; fi
+            pat=$(jq -r '.token // empty' <<<"$row")
+            if [ -z "$pat" ]; then pat="${ADMIN_PAT:-}"; fi
+            if [ -z "$pat" ]; then echo "provision $repo skipped — no token in row and no GH_RING_ADMIN_PAT"; continue; fi
             for f in .github/workflows/zen-pool.yml scripts/zen-pool-worker.mjs scripts/zen-client.mjs; do
-              code=$(curl -sS -o /dev/null -w '%{http_code}' -H "authorization: Bearer $pat" -H 'accept: application/vnd.github+json' "https://api.github.com/repos/$repo/contents/$f")
-              if [ "$code" = "200" ]; then echo "provision $repo $f present"; continue; fi
-              jq -n --arg msg "zen-pool: add $f" --arg content "$(base64 -w0 < "$f")" \
+              # The ladder repo is the source of truth for the worker code — pull from there, not
+              # from this repo, so a worker change lands in the ring on the next sync. And always
+              # overwrite: the old "skip if present" left stale workers serving empty prompts.
+              content=$(curl -sS "https://raw.githubusercontent.com/trained-assist/trained-assist-llm-ladder/main/$f" | base64 -w0)
+              jq -n --arg msg "zen-pool: sync $f" --arg content "$content" \
                 '{message:$msg, content:$content, branch:"main"}' > /tmp/req.json
               code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X PUT \
                 -H "authorization: Bearer $pat" -H 'accept: application/vnd.github+json' -H 'content-type: application/json' \
@@ -144,7 +96,7 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           BASE: ${{ vars.ZEN_RUNNER_URL }}
-          RING_ADMIN: ${{ secrets.ZEN_RING_ADMIN_TOKEN }}
+          RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
         run: |
           set -euo pipefail
           jq -c '.[]' .ring/ring.json | while read -r row; do
@@ -157,7 +109,7 @@ jobs:
                      + (if .token_ref then {token_ref:.token_ref} else {} end)' <<<"$row" > /tmp/body.json
             fi
             code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST "$BASE/zen/repos" \
-              -H "authorization: Bearer $RING_ADMIN" -H 'content-type: application/json' --data @/tmp/body.json)
+              -H "authorization: Bearer $RUNNER_TOKEN" -H 'content-type: application/json' --data @/tmp/body.json)
             echo "register $repo http=$code $(jq -r '.error // "ok"' /tmp/resp.json 2>/dev/null || echo ok)"
           done
 
@@ -165,10 +117,6 @@ jobs:
         if: always()
         env:
           BASE: ${{ vars.ZEN_RUNNER_URL }}
-          RING_ADMIN: ${{ secrets.ZEN_RING_ADMIN_TOKEN }}
         run: |
-          set -euo pipefail
           echo "--- zen/health ---"; curl -sS "$BASE/zen/health"; echo
           echo "--- zen/pool/health ---"; curl -sS "$BASE/zen/pool/health"; echo
-          echo "--- zen/ring/repos ---"
-          curl -sS -H "authorization: Bearer $RING_ADMIN" "$BASE/zen/ring/repos" | jq -c '{source, repos:[.repos[]|{repo,enabled,location,token_ref,has_token}]}' || echo "registry read-out refused — is ZEN_RING_ADMIN_TOKEN published to the worker?"
