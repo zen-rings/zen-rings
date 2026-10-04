@@ -8,6 +8,8 @@ import {
 const ENV = { ZEN_RUNNER_TOKEN: 'zen-tok', ZEN_TOKEN_KEY: Buffer.alloc(32, 7).toString('base64') };
 const NOW = Date.UTC(2026, 9, 4, 10, 0, 0);
 const auth = { authorization: 'Bearer zen-tok' };
+const ADMIN = { authorization: 'Bearer ring-admin-tok' };
+const ADMIN_ENV = { ZEN_RING_ADMIN_TOKEN: 'ring-admin-tok' };
 
 // In-memory D1 double: enough of the real semantics for the control plane (the budget upsert is
 // emulated faithfully — stale rolling minute resets, new UTC day resets) so the endpoint can be
@@ -56,8 +58,16 @@ function fakeD1(seed = {}) {
       return [...models.values()].filter((m) => m.next_check_at <= now && m.status !== status).slice(0, max);
     }
     if (/SELECT \* FROM zen_repos WHERE enabled = 1 ORDER BY/.test(sql)) return repos.filter((r) => r.enabled);
+    if (/SELECT \* FROM zen_repos ORDER BY/.test(sql)) {
+      return [...repos].sort((a, b) => (a.added_at || 0) - (b.added_at || 0) || a.repo.localeCompare(b.repo));
+    }
     if (/SELECT repo, enabled, location, token_ref/.test(sql)) {
-      return repos.map((r) => ({ ...r, has_token: !!r.token_enc }));
+      // Project the named columns only, exactly like D1: a spread of the whole row here would let a
+      // test pass on a listing that leaks token_enc in production.
+      return repos.map((r) => ({
+        repo: r.repo, enabled: r.enabled, location: r.location, token_ref: r.token_ref,
+        has_token: !!r.token_enc, last_dispatch_at: r.last_dispatch_at,
+      }));
     }
     if (/SELECT token_enc, token_ref FROM zen_repos WHERE repo = \?1/.test(sql)) {
       const r = repos.find((x) => x.repo === p[0]);
@@ -305,11 +315,17 @@ test('POST /zen/report + GET /zen/models: the dead model goes quiet, the healthy
   assert.equal(refused.status, 409, 'the 100-times-per-run hammering is exactly what this prevents');
 });
 
-test('POST /zen/repos: token stored encrypted, never returned; env: reference needs no key', async () => {
+test('POST /zen/repos: admin token only, token stored encrypted, never returned; env: reference needs no key', async () => {
   const d1 = fakeD1();
-  const call = (body) => handle(new Request('https://l.test/zen/repos', {
-    method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify(body),
-  }), env(d1));
+  const call = (body, headers = ADMIN, extra = ADMIN_ENV) => handle(new Request('https://l.test/zen/repos', {
+    method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body),
+  }), env(d1, extra));
+
+  // A ring member holds ZEN_RUNNER_TOKEN. It may run models; it may not rewrite the ring.
+  assert.equal((await call({ repo: 'o/one', token: 't' }, auth, ADMIN_ENV)).status, 401,
+    'the low-privilege ring token must not open registry writes');
+  assert.equal((await call({ repo: 'o/one', token: 't' }, ADMIN, {})).status, 503,
+    'no admin token published → refuse loudly instead of accepting the write');
 
   assert.equal((await call({ repo: 'not-a-repo' })).status, 400);
   const r = await call({ repo: 'o/one', token: 'ghp_supersecret', location: 'eu' });
@@ -327,12 +343,52 @@ test('POST /zen/repos: token stored encrypted, never returned; env: reference ne
   // no key configured → refuse rather than keep a plaintext token
   const d1b = fakeD1();
   const noKey = await handle(new Request('https://l.test/zen/repos', {
-    method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ repo: 'o/x', token: 't' }),
-  }), { ZEN_RUNNER_TOKEN: 'zen-tok', ZEN_DB: d1b }, {});
+    method: 'POST', headers: { ...ADMIN, 'content-type': 'application/json' }, body: JSON.stringify({ repo: 'o/x', token: 't' }),
+  }), { ...ENV, ...ADMIN_ENV, ZEN_TOKEN_KEY: '', ZEN_DB: d1b }, {});
   assert.equal(noKey.status, 503);
 
   await call({ repo: 'o/two', enabled: false });
   assert.equal(d1._repos[1].enabled, 0, 'a row can be switched off without deleting it');
+});
+
+test('GET /zen/ring/*: the registry lives in CF D1 and the ring token alone cannot read it', async () => {
+  const d1 = fakeD1({
+    repos: [
+      { repo: 'o/enc', token_enc: await encryptToken('ghp_enc', ENV.ZEN_TOKEN_KEY), enabled: 1, location: 'eu', added_at: 1 },
+      { repo: 'o/env', token_ref: 'env:GH_ONE', token_enc: null, enabled: 1, location: '', added_at: 2 },
+      { repo: 'o/off', token_ref: 'env:GH_ONE', token_enc: null, enabled: 0, added_at: 3 },
+    ],
+  });
+  const envWithSecret = { ...ADMIN_ENV, GH_ONE: 'ghp_from_worker_secret' };
+
+  const listing = await handle(new Request('https://l.test/zen/ring/repos', { headers: ADMIN }), env(d1, envWithSecret), {});
+  assert.equal(listing.status, 200);
+  const listed = JSON.stringify(await listing.json());
+  for (const leak of ['ghp_enc', 'ghp_from_worker_secret', 'token_enc']) {
+    assert.ok(!listed.includes(leak), `the human listing must not carry ${leak}`);
+  }
+  assert.deepEqual(JSON.parse(listed).repos.map((r) => r.repo), ['o/enc', 'o/env', 'o/off']);
+
+  // the payload is what provisioning reads: tokens in, no printing, no caching
+  const payload = await handle(new Request('https://l.test/zen/ring/payload', { headers: ADMIN }), env(d1, envWithSecret), {});
+  assert.equal(payload.status, 200);
+  assert.equal(payload.headers.get('cache-control'), 'no-store', 'plaintext PATs must never sit in a cache');
+  const body = await payload.json();
+  const byRepo = Object.fromEntries(body.repos.map((r) => [r.repo, r]));
+  assert.equal(byRepo['o/enc'].token, 'ghp_enc', 'the encrypted row comes back decrypted for provisioning');
+  assert.equal(byRepo['o/env'].token_ref, 'env:GH_ONE', 'the reference is preserved so it stays rotatable');
+  assert.equal(byRepo['o/env'].resolved_token, 'ghp_from_worker_secret', 'and resolved for provisioning only');
+  assert.equal(byRepo['o/env'].token, undefined, 'an env: row must not be rewritten into a stored copy');
+  assert.equal(byRepo['o/off'].enabled, false, 'a switched-off row is still reported, not hidden');
+
+  for (const headers of [auth, {}]) {
+    const res = await handle(new Request('https://l.test/zen/ring/payload', { headers }), env(d1, envWithSecret), {});
+    assert.equal(res.status, 401, 'only the ring-admin token reads plaintext tokens');
+  }
+  const noAdmin = { ...envWithSecret, ZEN_RING_ADMIN_TOKEN: '' };
+  assert.equal((await handle(new Request('https://l.test/zen/ring/payload', { headers: ADMIN }), env(d1, noAdmin), {})).status, 503,
+    'a worker without the admin secret keeps the route closed');
+  assert.equal((await handle(new Request('https://l.test/zen/ring/repos', { headers: ADMIN }), env(d1, noAdmin), {})).status, 503);
 });
 
 test('budget caps are configurable per environment, defaults are the owner numbers', async () => {

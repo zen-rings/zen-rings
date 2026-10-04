@@ -35,7 +35,9 @@
 | `GET /zen/models` | таблица: модель, статус, `verdict: run \| skip`, `next_check_in`, последняя ошибка |
 | `POST /zen/run` | `{model, runs?}` → `202 {run_id, repo, location, ring_size}` |
 | `POST /zen/report` | `{run_id?, model, ok, kind?, error?}` → состояние, которое читает `/zen/models` |
-| `POST /zen/repos` | строка реестра: репозиторий + зашифрованный токен |
+| `POST /zen/repos` | строка реестра: репозиторий + зашифрованный токен — **только `ZEN_RING_ADMIN_TOKEN`** |
+| `GET /zen/ring/repos` | реестр как есть, без токенов (тот же админский токен) |
+| `GET /zen/ring/payload` | тот же список **с** открытыми токенами, расшифровка в воркере, `no-store` |
 
 Отказы всегда явные:
 
@@ -83,6 +85,37 @@
 - `{"repo": …, "enabled": false}` гасит строку, не удаляя её.
 - В принимающем репозитории должен быть триггер `repository_dispatch: types: [zen-run]`.
 
+### Реестр и есть источник правды (5 октября 2026)
+
+Раньше список кольца жил в секрете GitHub `ZEN_RING_PAYLOAD`, а его наполнял агент по таблице
+владельца. Схема ломалась в двух местах: таблицу и секрет могли развести, и без агента правки
+владельца не доезжали никуда. Сейчас единственная копия — таблица `zen_repos` в D1 этого же воркера,
+и её читает то, что реально работает:
+
+| Кто | Что читает | Чем |
+|---|---|---|
+| воркер (диспатч в кольцо) | `zen_repos` | напрямую из D1 |
+| `zen-ring-sync.yml` | `GET /zen/ring/payload` | `ZEN_RING_ADMIN_TOKEN` |
+| владелец | `scripts/zen-ring.mjs list\|add\|disable` | `ZEN_RING_ADMIN_TOKEN` |
+
+Два токена намеренно разные. `ZEN_RUNNER_TOKEN` — низкий: он лежит в секретах **каждого** члена
+кольца (вызвать модель, отчитаться). `ZEN_RING_ADMIN_TOKEN` не уезжает ни в одно кольцо: он открывает
+реестр на запись и список с открытыми токенами. Один токен на обе задачи означал бы, что
+скомпрометированный публичный участник кольца читает PAT всех приватных репозиториев.
+
+Два правила, которые нельзя нарушать:
+
+- строка `env:NAME` возвращается из payload **вместе** с `resolved_token`, но назад пишется только
+  ссылка — иначе `env:`-строка превратится в замороженную копию секрета, который должен
+  ротироваться; поэтому шаг provision берёт `.token // .resolved_token`, а шаг register шлёт
+  `token_ref` без `token`;
+- этот репозиторий публичный: логи и inputs Actions читает кто угодно. Токен из payload маскируется
+  (`::add-mask::`) до того, как что-либо сможет его напечатать, и никогда не передаётся аргументом.
+
+Переезд был разовым: `zen-ring-sync` с `source: gh-secret, import: true` перелил строки секрета в
+D1 (воркер зашифровал их своим `ZEN_TOKEN_KEY`), после чего `source: cf` стал умолчанием, а секрет
+`ZEN_RING_PAYLOAD` удалён.
+
 ## Проверка
 
 ```bash
@@ -92,6 +125,10 @@ curl -fsS https://llm-ladder.trainedassist.store/zen/health
 # таблица (нужен ZEN_RUNNER_TOKEN)
 curl -fsS -H "authorization: Bearer $ZEN_RUNNER_TOKEN" \
   https://llm-ladder.trainedassist.store/zen/models
+
+# кольцо — состав без токенов (нужен ZEN_RING_ADMIN_TOKEN)
+curl -fsS -H "authorization: Bearer $ZEN_RING_ADMIN_TOKEN" \
+  https://llm-ladder.trainedassist.store/zen/ring/repos | jq -c '.repos[]|{repo,enabled,token_ref,has_token}'
 
 # запуск теста модели
 curl -fsS -X POST -H "authorization: Bearer $ZEN_RUNNER_TOKEN" -H 'content-type: application/json' \
