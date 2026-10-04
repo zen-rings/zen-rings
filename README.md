@@ -117,6 +117,12 @@ says so in the run summary, so a fork without Cloudflare access stays green.
 from the repository this project was seeded from and must not be regenerated: a new value makes
 every stored ring token undecryptable.
 
+Three scheduled workflows are switched off here while the repository this project was seeded
+from still runs them — otherwise the autoscale cron (`*/2 * * * *`) would ask the hub for
+workers twice a minute, from two repos. `ladder-analytics`, `zen-pool-scale` and
+`zen-selftest` are `disabled_manually`; turn them on in Settings → Actions once the old
+repository is retired.
+
 Gate/live tokens come from `$LADDER_TOKEN` or `~/.llm-ladder-token` (chmod 600, outside the repo) —
 read them inside the script, never echo them into a prompt or a file in the repo.
 
