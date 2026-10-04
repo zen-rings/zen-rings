@@ -3,22 +3,13 @@ on:
   workflow_dispatch:
 jobs:
   go:
+    runs-on: ubuntu-later
     runs-on: ubuntu-latest
     env:
       T: ${{ secrets.CF_API_TOKEN }}
       ACC: d740a05e9442c1d0feacae2dfc673e93
     steps:
-      - name: create
+      - name: cleanup
         run: |
-          H="Authorization: Bearer $T"
-          curl -s -o /tmp/g -H "$H" "https://api.cloudflare.com/client/v4/accounts/$ACC/tokens/permission_groups"
-          G=$(jq -c '[.result[]? | select(.name=="Pages Write" or .name=="Workers Scripts Write" or .name=="Workers KV Storage Write" or .name=="Workers Tail Read" or .name=="D1 Write" or .name=="Account Settings Read" or .name=="Workers Routes Read") | .id]' /tmp/g)
-          echo "ids=$G"
-          POLICY=$(jq -nc --arg acct "$ACC" --argjson g "$G" '{effect:"allow",resources:{("com.cloudflare.api.account."+$acct):"*"},permission_groups:[$g[]|{id:.}]}')
-          BODY=$(jq -nc --argjson p "$POLICY" '{name:"ladder-deploy-key-2026-10-05",policies:[$p]}')
-          curl -s -o /tmp/c -X POST -H "$H" -H "Content-Type: application/json" -d "$BODY" "https://api.cloudflare.com/client/v4/accounts/$ACC/tokens"
-          echo "=== RAW ==="
-          cat /tmp/c
-          echo ""
-          echo "=== TOKENS ==="
-          curl -s -H "$H" "https://api.cloudflare.com/client/v4/accounts/$ACC/tokens" | jq -c '[.result[]? | {id, name, status}]'
+          curl -s -X DELETE -H "Authorization: Bearer $T" "https://api.cloudflare.com/client/v4/accounts/$ACC/tokens/7e4a4f08f276f8ae46c8f4e9c5e0cf4d" | jq -c .
+          curl -s -H "Authorization: Bearer $T" "https://api.cloudflare.com/client/v4/accounts/$ACC/tokens" | jq -c '[.result[]?|{name,status}]'
