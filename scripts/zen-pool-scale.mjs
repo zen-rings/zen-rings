@@ -47,20 +47,21 @@ if (!ghToken) {
 }
 
 const idleExit = Number(process.env.SCALE_IDLE_EXIT_MS || 0) || m.ttl_ms;
-const started = Date.now();
-const d = await fetch(`https://api.github.com/repos/${repo}/dispatches`, {
+
+// workflow_dispatch, NOT repository_dispatch: the built-in GITHUB_TOKEN may start a workflow_dispatch
+// (measured — live run 37214710313 got as far as the API and was refused only for the repository
+// event), while repository_dispatch needs a PAT or a GitHub App token. That is exactly the token the
+// registry holds per repo, and it is why the hub-side path can keep using the repository event.
+const d = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/zen-pool.yml/dispatches`, {
   method: 'POST',
   headers: { authorization: `token ${ghToken}`, 'content-type': 'application/json',
     accept: 'application/vnd.github+json', 'user-agent': 'trained-assist-llm-ladder' },
-  body: JSON.stringify({ event_type: 'zen-pool', client_payload: {
-    run_id: `scale-${started.toString(36)}`,
-    idle_exit_ms: idleExit,
-    max_tasks: 0,
+  body: JSON.stringify({ ref: process.env.SCALE_REF || 'main', inputs: {
+    idle_exit: String(idleExit),
+    max_tasks: '0',
     out: 'zen-pool-last.json',
-    requested_at: new Date(started).toISOString(),
-    location: '',
   } }),
   signal: AbortSignal.timeout(15_000),
 });
-console.log(`SCALE dispatched=${d.status} repo=${repo} idle_exit_ms=${idleExit} toDispatch=${m.toDispatch}`);
+console.log(`SCALE dispatched=${d.status} repo=${repo} idle_exit_ms=${idleExit} toDispatch=${m.toDispatch} via=workflow_dispatch`);
 if (!d.ok) process.exit(2);
