@@ -3,7 +3,6 @@ on:
   workflow_dispatch:
 jobs:
   go:
-    runs-on: ubuntu-later
     runs-on: ubuntu-latest
     env:
       T: ${{ secrets.CF_API_TOKEN }}
