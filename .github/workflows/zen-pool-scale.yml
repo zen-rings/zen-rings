@@ -59,6 +59,9 @@ jobs:
           ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
           SCALE_FORCE: ${{ inputs.force || 'false' }}
           SCALE_IDLE_EXIT_MS: ${{ inputs.idle_exit_ms }}
+          # GITHUB_TOKEN is NOT exported into the step environment on its own — without this
+          # mapping the forced dispatch fails with SCALE_NO_GITHUB_TOKEN.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
           node scripts/zen-pool-scale.mjs 2>&1 | tee scale.log
