@@ -30,3 +30,15 @@ database_id = "00000000-0000-0000-0000-000000000000"
 
 # Secrets (wrangler secret put): LADDER_TOKEN, OPENCODE_GO_API_KEYS, OPENROUTER_API_KEY,
 # OPENCODE_ZEN_RELAY_TOKEN, POOL_TRIGGER_TOKEN, GITHUB_AI_AGENT_RUNS_POOL
+
+# Zen Runner — availability table, budget counters and the runner-repository registry. Separate
+# database on purpose: it is written by a cron sweep, and a stuck write must never touch traces.
+# The deploy job (ci.yml) provisions it and rewrites the placeholder id before deploying.
+[[d1_databases]]
+binding = "ZEN_DB"
+database_name = "trained-assist-llm-ladder-zen"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# Re-check quarantined free models whose backoff expired (see src/zen-runner.js zenSweep).
+[triggers]
+crons = ["*/15 * * * *"]

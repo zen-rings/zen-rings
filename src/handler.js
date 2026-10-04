@@ -4,6 +4,7 @@
 
 import { run, readPool, fetchGoUsage, DEFAULT_LADDER, sanitizeAppSlug, sanitizeAppTitle } from './ladder.js';
 import { makeTrace, logCall } from './trace.js';
+import * as zen from './zen-runner.js';
 import config from '../config/ladders.json' with { type: 'json' };
 import prices from '../config/prices.json' with { type: 'json' };
 
@@ -236,6 +237,13 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
   if (request.method === 'POST' && url.pathname === '/pool/trigger') {
     return poolTrigger(request, env, fetchImpl);
   }
+  // Zen Runner control plane: its own token (ZEN_RUNNER_TOKEN), before the LADDER_TOKEN gate —
+  // same placement as the pool routes, so nothing in the ladder call path changes.
+  if (request.method === 'GET' && url.pathname === '/zen/health') return zen.zenHealth(request, env);
+  if (request.method === 'GET' && url.pathname === '/zen/models') return zen.zenModels(request, env);
+  if (request.method === 'POST' && url.pathname === '/zen/run') return zen.zenRun(request, env, fetchImpl);
+  if (request.method === 'POST' && url.pathname === '/zen/report') return zen.zenReport(request, env);
+  if (request.method === 'POST' && url.pathname === '/zen/repos') return zen.zenRepos(request, env);
   if (!authorized(request, env)) return oaError(401, 'unauthorized', 'auth_error');
 
   if (request.method === 'GET' && url.pathname === '/v1/models') {

@@ -38,6 +38,38 @@ jobs:
           fi
           echo "DB_ID=$DB_ID" >> "$GITHUB_ENV"
           sed -i "s/00000000-0000-0000-0000-000000000000/$DB_ID/" wrangler.toml
+      - name: Provision D1 zen database
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if CREATE_OUT=$(npx --yes wrangler@4 d1 create trained-assist-llm-ladder-zen 2>&1); then
+            ZEN_ID=$(printf '%s' "$CREATE_OUT" | grep -oE 'database_id = "[0-9a-f-]+"' | grep -oE '[0-9a-f-]{36}')
+          else
+            ZEN_ID=$(npx --yes wrangler@4 d1 list --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print([x.get("uuid") for x in d if x.get("name")=="trained-assist-llm-ladder-zen"][0])')
+          fi
+          echo "ZEN_ID=$ZEN_ID" >> "$GITHUB_ENV"
+          # Only the zen placeholder is left — the trace one was already substituted above.
+          sed -i "s/00000000-0000-0000-0000-000000000000/$ZEN_ID/" wrangler.toml
+      - name: Apply zen schema
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-zen --file schema/zen.sql --remote
+      - name: Publish zen-runner secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
+          ZEN_TOKEN_KEY: ${{ secrets.ZEN_TOKEN_KEY }}
+        # The controller token and the token-encryption key live in GitHub secrets and are pushed
+        # to the worker here — they must never be plain `--var`s, which Cloudflare shows in the
+        # dashboard. `secret put` is idempotent, so this runs on every deploy.
+        run: |
+          set -euo pipefail
+          [ -n "$ZEN_RUNNER_TOKEN" ] && printf '%s' "$ZEN_RUNNER_TOKEN" | npx --yes wrangler@4 secret put ZEN_RUNNER_TOKEN
+          [ -n "$ZEN_TOKEN_KEY" ] && printf '%s' "$ZEN_TOKEN_KEY" | npx --yes wrangler@4 secret put ZEN_TOKEN_KEY
       - name: Apply trace schema
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -57,7 +89,7 @@ jobs:
       - name: Smoke
         run: |
           for i in 1 2 3 4 5 6; do
-            curl -fsS https://llm-ladder.trainedassist.store/health && exit 0
+            curl -fsS https://llm-ladder.trainedassist.store/health && curl -fsS https://llm-ladder.trainedassist.store/zen/health && exit 0
             sleep 10
           done
           exit 1

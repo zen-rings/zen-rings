@@ -15,6 +15,11 @@ on:
       prompt:
         description: 'prompt for the live calls'
         default: 'Answer in one short sentence: what is 2+4?'
+  # Zen Runner dispatches here (POST /zen/run → repository_dispatch). This repo is one ring
+  # position: its Actions egress IP is one unit of the free-tier budget. client_payload carries
+  # {run_id, model, runs, location} — the runner names the model, this workflow never chooses.
+  repository_dispatch:
+    types: [zen-run]
   schedule:
     # Every 6h = a fresh Azure egress IP per run, so each run gets its own free-tier budget
     # (spec §7 mode A). 15 models x 2 calls x 4 runs/day is ~120 requests — far under the ~940/day
@@ -54,10 +59,13 @@ jobs:
         id: zen
         env:
           ZEN_EGRESS: github-hosted
-          ZEN_MODELS: ${{ inputs.models }}
-          ZEN_RUNS: ${{ inputs.runs }}
+          ZEN_MODELS: ${{ inputs.models || github.event.client_payload.model }}
+          ZEN_RUNS: ${{ inputs.runs || github.event.client_payload.runs }}
           ZEN_DEEP: ${{ inputs.deep }}
           ZEN_PROMPT: ${{ inputs.prompt }}
+          ZEN_RUN_ID: ${{ github.event.client_payload.run_id }}
+          ZEN_RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
+          ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
         run: |
           # Inputs arrive EMPTY on a schedule event, so the argv is built here and never inlined:
           # an inline "--runs <input>" renders as a dangling --runs that eats the next flag.
@@ -82,6 +90,30 @@ jobs:
             console.log('negative(stream:false): ' + r.negative.status + ' ' + r.negative.verdict);
             console.log('offline over-cap refusal: ' + r.offline.verdict + ' (cap=' + r.offline.cap + ', over=' + r.offline.over + ' tokens)');
           "
+      - name: report to zen runner
+        if: always() && github.event_name == 'repository_dispatch'
+        env:
+          ZEN_RUN_ID: ${{ github.event.client_payload.run_id }}
+          ZEN_RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
+          ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
+        # One POST /zen/report per model: ok / kind / error is exactly what the ladder reads back
+        # to decide "call it now" vs "come back later". Without this the table stays empty and
+        # every model looks unknown — which is how a dead provider gets poked 100 times a run.
+        run: |
+          set -euo pipefail
+          [ -n "${ZEN_RUNNER_URL:-}" ] && [ -n "${ZEN_RUNNER_TOKEN:-}" ] || { echo "runner not configured — skipping report"; exit 0; }
+          MODEL="${{ github.event.client_payload.model }}"
+          node -e "
+            const r = require('./zen-selftest.json');
+            const m = r.models[process.argv[1]] || {};
+            const out = { run_id: process.argv[2], model: process.argv[1], ok: (m.ok || 0) > 0,
+              kind: m.lastKind || (m.ok ? 'ok' : 'error'), error: (m.lastError || '').slice(0, 300) };
+            fetch(process.argv[3] + '/zen/report', { method: 'POST',
+              headers: { authorization: 'Bearer ' + process.argv[4], 'content-type': 'application/json' },
+              body: JSON.stringify(out) })
+              .then(async r2 => console.log('report ' + r2.status + ' ' + (await r2.text()).slice(0, 200)))
+              .catch(e => console.log('report failed: ' + e.message));
+          " "$MODEL" "$ZEN_RUN_ID" "$ZEN_RUNNER_URL" "$ZEN_RUNNER_TOKEN"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
