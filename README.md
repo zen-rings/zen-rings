@@ -113,15 +113,14 @@ The deploy job needs four repository secrets — `CF_API_TOKEN`, `CF_ACCOUNT_ID`
 `ZEN_TOKEN_KEY`. Without `CF_API_TOKEN` the job does not fail the branch: it skips the deploy and
 says so in the run summary, so a fork without Cloudflare access stays green.
 
-`ZEN_TOKEN_KEY` is the key the pool registry's per-repo tokens are encrypted with. It is copied
-from the repository this project was seeded from and must not be regenerated: a new value makes
-every stored ring token undecryptable.
+`ZEN_TOKEN_KEY` is the key the pool registry's per-repo tokens are encrypted with. It was
+copied over from the repository this project was seeded from and must not be regenerated: a new
+value makes every stored ring token undecryptable.
 
-Three scheduled workflows are switched off here while the repository this project was seeded
-from still runs them — otherwise the autoscale cron (`*/2 * * * *`) would ask the hub for
-workers twice a minute, from two repos. `ladder-analytics`, `zen-pool-scale` and
-`zen-selftest` are `disabled_manually`; turn them on in Settings → Actions once the old
-repository is retired.
+This repository is the product home; the old one only keeps the schedules switched off.
+`ladder-analytics`, `zen-pool-scale` and `zen-selftest` are `disabled_manually` there and active
+here — exactly one repo asks the hub for workers, so the autoscale cron (`*/2 * * * *`) never
+fires twice for the same tick. Delete the old repository once nothing points at it.
 
 Gate/live tokens come from `$LADDER_TOKEN` or `~/.llm-ladder-token` (chmod 600, outside the repo) —
 read them inside the script, never echo them into a prompt or a file in the repo.
