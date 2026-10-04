@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 
 // scripts/analytics.py is the report path over D1; load it as a module (dash in filename)
-// the same way query-trace.test.js does, and test the pure parts without any network.
+// and test the pure parts without any network.
 const LOAD = "import importlib.util as u; s = u.spec_from_file_location('an', 'scripts/analytics.py'); m = u.module_from_spec(s); s.loader.exec_module(m)";
 const run = (code) => execFileSync('python3', ['-c', `${LOAD}\n${code}`], { encoding: 'utf8', stdio: 'pipe' });
 
