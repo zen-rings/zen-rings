@@ -11,6 +11,9 @@ name: zen-pool-call
 on:
   workflow_dispatch:
     inputs:
+      scenario:
+        description: 'single = one call | smoke = the whole protocol end to end'
+        default: 'single'
       model:
         description: 'model id, e.g. nemotron-3.5-lightning-free'
         default: 'nemotron-3.5-lightning-free'
@@ -49,7 +52,18 @@ jobs:
         if: steps.nodecheck.outputs.need_setup == 'true'
         with:
           node-version: 22
+      - name: smoke — the whole protocol
+        if: inputs.scenario == 'smoke'
+        env:
+          ZEN_RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
+          ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
+        run: |
+          set -uo pipefail
+          node scripts/zen-pool-smoke.mjs | tee smoke.log
+          exit ${PIPESTATUS[0]}
+
       - name: call the pool
+        if: inputs.scenario != 'smoke'
         id: call
         env:
           ZEN_RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
@@ -67,8 +81,9 @@ jobs:
       - name: summary
         if: always()
         run: |
+          set +e
           {
             echo '```'
-            grep -E '^CALL_(POOL|STATUS|TEXT|RESULT|PENDING|WATCHDOG)' call.log || cat call.log
+            { grep -E '^SMOKE' smoke.log 2>/dev/null || grep -E '^CALL_(POOL|STATUS|TEXT|RESULT|PENDING|WATCHDOG)' call.log 2>/dev/null || cat call.log 2>/dev/null || echo 'no log'; }
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
