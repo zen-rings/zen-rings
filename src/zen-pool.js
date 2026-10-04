@@ -86,6 +86,34 @@ export function leaseExpired(row, now) {
   return !row || now > Number(row.lease_expires_at || 0);
 }
 
+// Should this worker give up its lease after a failed call?
+//
+// The measured reality (2026-10-04, three live runs): the daily quota is ~1000 requests per
+// (egress IP, model) and a GitHub Actions run gets a NEW egress IP every time it boots — five
+// consecutive runs on this account came up on 13.71.231.39, 128.203.190.81, 172.184.213.225,
+// 172.184.211.241, 135.232.201.244. So an address that answered `daily` is not a dead model and
+// not a dead provider: it is a spent address, and the cure is a new job, not a retry.
+//
+// That makes this the one rotation point of the whole pool. A worker that keeps its lease after
+// `daily` goes on claiming tasks and failing every one of them — each failure burns a queued task
+// and the caller's watchdog — while the address stays dark until 00:00 UTC. Handing the lease back
+// is what lets the autoscaler boot a fresh run, which lands on a fresh address with a full quota.
+//
+// `provider` (a bare 429 with no retry-after) is the same wall seen from the other side: the
+// per-minute burst limit, measured at ~90-95/min per (IP, model). Our own governor holds 50/min, so
+// hitting it means the address is being shared with something else and is equally spent.
+// `rate` is the same shape without the provider marker. `timeout` and `error` are NOT rotation:
+// those are transient and the address is still good, so the worker stays and serves the next task.
+export function shouldRotateOnResult(kind) {
+  return kind === 'daily' || kind === 'provider' || kind === 'rate';
+}
+
+// Same question for the LOCAL budget: once a worker has spent its own daily allowance it is out of
+// addresses' worth of quota too, so it rotates instead of sitting on a lease it can never use.
+export function shouldRotateOnLocalStop(stoppedBy) {
+  return stoppedBy === 'local-budget';
+}
+
 // A lease is usable only while the job is live AND has not gone silent: a job that died without
 // saying goodbye simply stops renewing, and this is what drops it out of the pool.
 export function leaseUsable(row, now) {
@@ -386,7 +414,22 @@ export async function zenPoolResult(request, env) {
   await writeResult(env, task, body, now);
   const state = applyReport(await readModel(env, task.model), { ok: !!body.ok, kind: body.kind, error: body.error }, now);
   await writeModel(env, task.model, state);
-  return j(200, { accepted: true, task_id: taskId, state: state.status, next_check_in: Math.max(0, state.next_check_at - now) });
+
+  // The rotation point. A quota refusal means this run's egress address is spent, and a new run
+  // gets a new one — so the worker is told to hand its lease back instead of claiming the next task
+  // and failing that too. `bye: true` here is what the worker's pull loop acts on; the autoscaler
+  // then sees one fewer live worker and boots a replacement on a fresh address.
+  const rotate = shouldRotateOnResult(body.ok ? null : body.kind) || shouldRotateOnLocalStop(body.stopped_by);
+  if (rotate) {
+    await db(env).prepare(
+      "UPDATE zen_pool_workers SET state = ?1, stop_reason = ?2, exited_at = ?3 WHERE id = ?4 AND state = 'live'"
+    ).bind('gone', `quota:${String(body.kind || 'unknown').slice(0, 40)}`, now, task.lease_id).run();
+  }
+  return j(200, {
+    accepted: true, task_id: taskId, state: state.status, next_check_in: Math.max(0, state.next_check_at - now),
+    rotate, bye: rotate,
+    rotate_reason: rotate ? `address spent (${body.kind || 'unknown'}) — start a new run for a fresh one` : null,
+  });
 }
 
 // POST /zen/pool/stop — "а потом её убиваем": the next pull says bye and the job exits cleanly.

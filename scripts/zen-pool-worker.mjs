@@ -124,6 +124,7 @@ async function serve(task) {
     prompt: task.prompt,
     text,
     kind: res.ok ? 'ok' : res.kind,
+    stopped_by: res.ok ? null : (res.stopped_by || null),
     status: res.status ?? null,
     error: res.ok ? null : String(res.error || res.bodySnippet || '').slice(0, 500),
     provider_ms: res.ms ?? null,
@@ -147,8 +148,10 @@ async function serve(task) {
   const posted = await call('/zen/pool/result', {
     task_id: task.id, ok: record.ok, text, kind: record.kind, error: record.error,
     provider_ms: record.provider_ms, served_ms: record.served_ms,
+    stopped_by: record.stopped_by || null,
   });
-  mark('result_posted', { task_id: task.id, status: posted.status });
+  mark('result_posted', { task_id: task.id, status: posted.status, rotate: posted.json?.rotate === true });
+  record.rotate = posted.json?.rotate === true;
   return record;
 }
 
@@ -166,6 +169,19 @@ for (;;) {
     const record = await serve(p.json.task);
     served += 1;
     if (!record.ok) process.exitCode = 2;
+    // The quota on this run's egress address is gone (~1000 requests per IP per model, measured).
+    // A new run boots on a new address with a full quota, so leaving now is the recovery — and
+    // staying would mean claiming every queued task and failing it against a dark address until
+    // midnight UTC. `bye` is what the hub answered with; a local kind check covers an older hub.
+    const spent = record.rotate === true || record.kind === 'daily' || record.kind === 'provider' || record.kind === 'rate';
+    if (spent) {
+      console.log('POOL_ROTATE ' + JSON.stringify({
+        reason: 'address_quota_spent', kind: record.kind, served,
+        egress_ip: process.env.ZEN_EGRESS_IP || null, retry: 'boot a new run (new egress IP)',
+      }));
+      console.log('POOL_EXIT ' + JSON.stringify({ reason: 'address_quota_spent', served }));
+      process.exit(2);
+    }
     if (args.maxTasks > 0 && served >= args.maxTasks) {
       console.log('POOL_EXIT ' + JSON.stringify({ reason: 'max_tasks', served }));
       process.exit(record.ok ? 0 : 2);

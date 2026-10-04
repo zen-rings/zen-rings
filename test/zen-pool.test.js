@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { handle } from '../src/handler.js';
 import {
   clampWaitMs, clampPullHoldMs, pullDecision, leaseExpired, leaseUsable,
-  lambdaPerMin, inflightFrom, desiredWorkers, scaleDecision,
+  lambdaPerMin, inflightFrom, desiredWorkers, scaleDecision, shouldRotateOnResult, shouldRotateOnLocalStop,
   DEFAULT_WAIT_MS, MIN_WAIT_MS, MAX_WAIT_MS, DEFAULT_PULL_HOLD_MS,
   POOL_CEILING, POOL_RESERVE, POOL_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS,
 } from '../src/zen-pool.js';
@@ -158,6 +158,18 @@ const post = (path, body, d1, extra = {}) =>
   }), env(d1, extra));
 const get = (path, d1, headers = auth) =>
   handle(new Request(`https://l.test${path}`, { headers }), env(d1));
+
+test('rotation rule: only a spent address rotates; a transient one keeps the worker', () => {
+  // daily = the ~1000-request per-IP quota is gone, provider = the bare 429 burst wall,
+  // rate = the same wall without the provider marker. All three mean "this address is done".
+  for (const kind of ['daily', 'provider', 'rate']) assert.equal(shouldRotateOnResult(kind), true);
+  // timeout/error/context are transient or local: the address is still good, the worker stays.
+  for (const kind of ['timeout', 'error', 'context', 'fingerprint', 'cooldown']) assert.equal(shouldRotateOnResult(kind), false);
+  assert.equal(shouldRotateOnResult(null), false);
+  assert.equal(shouldRotateOnLocalStop('local-budget'), true);
+  assert.equal(shouldRotateOnLocalStop('local-rate'), false);
+  assert.equal(shouldRotateOnLocalStop(null), false);
+});
 
 test('watchdog: default 30 s, caller-supplied, clamped to [1 s, 90 s]', () => {
   assert.equal(clampWaitMs(undefined), DEFAULT_WAIT_MS);
@@ -392,6 +404,86 @@ test('metrics: λ from the task table, the ceiling and the verdict, in one answe
   assert.equal(m.reserve, POOL_RESERVE);
   assert.equal(m.autoscale, true);
   assert.equal(m.toDispatch, 1);         // Ф8: the queue is not empty and nothing is live
+});
+
+test('rotation: a spent address hands its lease back, so the pool boots a fresh run on a new one', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const gh = fakeGithub();
+  const extra = { RING_TOKEN: 'gh-tok' };
+
+  const reg = await post('/zen/pool/register', { worker_id: 'ring/one:9:1', repo: 'ring/one' }, d1, extra);
+  const lease = await reg.json();
+  const pending = postF('/zen/pool/invoke', { model: 'nemotron-3.5-lightning-free', prompt: '2+4?', wait_ms: 5000 }, d1, gh.fetchImpl, extra);
+  await new Promise((r) => setTimeout(r, 60));
+  const pulled = await get(`/zen/pool/pull?lease=${lease.lease_id}&hold_ms=5000`, d1);
+  const task = (await pulled.json()).task;
+  assert.ok(task);
+
+  // The provider answers 429 with a retry-after that lands on midnight UTC: the address is spent.
+  const res = await post('/zen/pool/result', { task_id: task.id, ok: false, kind: 'daily', error: 'Rate limit exceeded' }, d1, extra);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.rotate, true);
+  assert.equal(body.bye, true);
+  assert.match(body.rotate_reason, /address spent/);
+
+  // The lease is gone immediately — not after the 90 s TTL — so the pool sees the hole at once.
+  const health = await get('/zen/pool/health', d1, {});
+  assert.equal((await health.json()).workers_live, 0);
+
+  // And the next scale tick boots a replacement, which is the whole point: a new run = a new
+  // egress address = a fresh ~1000-request daily quota.
+  const scale = await postF('/zen/pool/scale', { demand: 1 }, d1, gh.fetchImpl, extra);
+  const sb = await scale.json();
+  assert.equal(sb.toDispatch, 1);
+  assert.equal(gh.calls.length, 1);
+  assert.equal(gh.calls[0].url, 'https://api.github.com/repos/ring/one/dispatches');
+
+  // The caller whose task failed is told so, not left hanging.
+  const failed = await pending;
+  assert.equal(failed.status, 502);
+  assert.equal((await failed.json()).kind, 'daily');
+});
+
+test('rotation: a transient failure does NOT give the lease back — the address is still good', async () => {
+  const d1 = fakeD1();
+  const reg = await post('/zen/pool/register', { worker_id: 'LLM-test:3:1' }, d1);
+  const lease = await reg.json();
+  const pending = post('/zen/pool/invoke', { model: 'mimo-v2.6-flash-free', prompt: '2+4?', wait_ms: 5000 }, d1);
+  await new Promise((r) => setTimeout(r, 60));
+  const pulled = await get(`/zen/pool/pull?lease=${lease.lease_id}&hold_ms=5000`, d1);
+  const task = (await pulled.json()).task;
+
+  // Three separate tasks: a result is accepted once per task, so each failure needs its own.
+  for (const kind of ['timeout', 'error', 'context']) {
+    const pend = post('/zen/pool/invoke', { model: 'mimo-v2.6-flash-free', prompt: '2+4?', wait_ms: 5000 }, d1);
+    await new Promise((r) => setTimeout(r, 60));
+    const pl = await get(`/zen/pool/pull?lease=${lease.lease_id}&hold_ms=5000`, d1);
+    const t = (await pl.json()).task;
+    assert.ok(t);
+    const res = await post('/zen/pool/result', { task_id: t.id, ok: false, kind, error: 'transient' }, d1);
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).rotate, false);
+    const failed = await pend;
+    assert.equal(failed.status, 502);
+  }
+  const health = await get('/zen/pool/health', d1, {});
+  assert.equal((await health.json()).workers_live, 1);
+});
+
+test('rotation: the local daily budget also rotates — a worker with no quota left must not idle', async () => {
+  const d1 = fakeD1();
+  const reg = await post('/zen/pool/register', { worker_id: 'LLM-test:4:1' }, d1);
+  const lease = await reg.json();
+  const pending = post('/zen/pool/invoke', { model: 'mimo-v2.6-flash-free', prompt: '2+4?', wait_ms: 5000 }, d1);
+  await new Promise((r) => setTimeout(r, 60));
+  const pulled = await get(`/zen/pool/pull?lease=${lease.lease_id}&hold_ms=5000`, d1);
+  const task = (await pulled.json()).task;
+
+  const res = await post('/zen/pool/result', { task_id: task.id, ok: false, kind: 'cooldown', stopped_by: 'local-budget', error: 'daily budget spent on this model' }, d1);
+  assert.equal((await res.json()).rotate, true);
+  const health = await get('/zen/pool/health', d1, {});
+  assert.equal((await health.json()).workers_live, 0);
 });
 
 test('cold start: invoke on an empty pool boots a worker and the answer still lands in the same call', async () => {
