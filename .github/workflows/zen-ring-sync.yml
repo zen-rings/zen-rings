@@ -12,7 +12,8 @@ name: zen-ring-sync
 #
 # Provisioning writes into each ring repo: .github/workflows/zen-pool.yml, scripts/zen-pool-worker.mjs,
 # scripts/zen-client.mjs, the ZEN_RUNNER_URL variable and the ZEN_RUNNER_TOKEN secret — i.e. exactly
-# what a pool worker needs to boot. GH_RING_ADMIN_PAT is only used for that write path.
+# what a pool worker needs to boot. Each row's own `token` is used for that write path (per-repo
+# ring); GH_RING_ADMIN_PAT is only the fallback for a row that carries no token.
 
 on:
   workflow_dispatch:
@@ -60,25 +61,30 @@ jobs:
           DAILY_BUDGET: '8000'
         run: |
           set -euo pipefail
-          if [ -z "${ADMIN_PAT:-}" ]; then echo 'GH_RING_ADMIN_PAT is not set — nothing provisioned'; exit 1; fi
           umask 077
           printf '%s' "$RUNNER_TOKEN" > /tmp/runner-token
-          for repo in $(jq -r '.[].repo' .ring/ring.json); do
+          # Each row carries its own token: the ring is per-repo, so provisioning must be too.
+          # A row without a token falls back to GH_RING_ADMIN_PAT (kept for the legacy path).
+          jq -c '.[]' .ring/ring.json | while read -r row; do
+            repo=$(jq -r '.repo' <<<"$row")
+            pat=$(jq -r '.token // empty' <<<"$row")
+            if [ -z "$pat" ]; then pat="${ADMIN_PAT:-}"; fi
+            if [ -z "$pat" ]; then echo "provision $repo skipped — no token in row and no GH_RING_ADMIN_PAT"; continue; fi
             for f in .github/workflows/zen-pool.yml scripts/zen-pool-worker.mjs scripts/zen-client.mjs; do
-              code=$(curl -sS -o /dev/null -w '%{http_code}' -H "authorization: Bearer $ADMIN_PAT" -H 'accept: application/vnd.github+json' "https://api.github.com/repos/$repo/contents/$f")
+              code=$(curl -sS -o /dev/null -w '%{http_code}' -H "authorization: Bearer $pat" -H 'accept: application/vnd.github+json' "https://api.github.com/repos/$repo/contents/$f")
               if [ "$code" = "200" ]; then echo "provision $repo $f present"; continue; fi
               jq -n --arg msg "zen-pool: add $f" --arg content "$(base64 -w0 < "$f")" \
                 '{message:$msg, content:$content, branch:"main"}' > /tmp/req.json
               code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X PUT \
-                -H "authorization: Bearer $ADMIN_PAT" -H 'accept: application/vnd.github+json' -H 'content-type: application/json' \
+                -H "authorization: Bearer $pat" -H 'accept: application/vnd.github+json' -H 'content-type: application/json' \
                 "https://api.github.com/repos/$repo/contents/$f" --data @/tmp/req.json)
               echo "provision $repo $f PUT=$code $(jq -r '.message // "ok"' /tmp/resp.json 2>/dev/null || echo ok)"
             done
-            code=$(GH_TOKEN="$ADMIN_PAT" gh variable set ZEN_RUNNER_URL --repo "$repo" --body "$RUNNER_URL" >/dev/null 2>&1; echo $?)
+            code=$(GH_TOKEN="$pat" gh variable set ZEN_RUNNER_URL --repo "$repo" --body "$RUNNER_URL" >/dev/null 2>&1; echo $?)
             echo "provision $repo var ZEN_RUNNER_URL rc=$code"
-            code=$(GH_TOKEN="$ADMIN_PAT" gh variable set ZEN_DAILY_BUDGET --repo "$repo" --body "$DAILY_BUDGET" >/dev/null 2>&1; echo $?)
+            code=$(GH_TOKEN="$pat" gh variable set ZEN_DAILY_BUDGET --repo "$repo" --body "$DAILY_BUDGET" >/dev/null 2>&1; echo $?)
             echo "provision $repo var ZEN_DAILY_BUDGET rc=$code"
-            code=$(GH_TOKEN="$ADMIN_PAT" gh secret set ZEN_RUNNER_TOKEN --repo "$repo" < /tmp/runner-token >/dev/null 2>&1; echo $?)
+            code=$(GH_TOKEN="$pat" gh secret set ZEN_RUNNER_TOKEN --repo "$repo" < /tmp/runner-token >/dev/null 2>&1; echo $?)
             echo "provision $repo secret ZEN_RUNNER_TOKEN rc=$code"
           done
           rm -f /tmp/runner-token
