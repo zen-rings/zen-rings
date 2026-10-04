@@ -30,8 +30,11 @@ const byModel = new Map((table?.models || []).map((m) => [m.model, m]));
 // answered earlier today while every model IN the table was in quarantine.
 // space-bunny-free first: verified answering 200 from a plain client just now, while
 // longcat-2.5-preview / mimo-v2.5 / ling-3.1 all refuse with the 403 fingerprint error.
+// 'down' means the provider is broken and silence is the right answer — skip those. 'ok' + 'skip'
+// only means "the self-test should not re-probe it for 6h", which says nothing about whether a
+// explicit call works, and the pool no longer lets the quarantine refuse one.
 const CANDIDATES = ['space-bunny-free', 'nemotron-3-ultra-free', 'nemotron-3.5-lightning-free', 'mimo-v2.6-flash-free'];
-const FAST = CANDIDATES.find((m) => byModel.get(m)?.verdict !== 'skip') || null;
+const FAST = CANDIDATES.find((m) => byModel.get(m)?.status !== 'down') || null;
 const SLOW = FAST;
 
 if (!token) { say('SMOKE_FAIL missing ZEN_RUNNER_TOKEN'); process.exit(3); }
@@ -69,7 +72,7 @@ const h = await waitForWorker();
 record('warm_job_registered', h?.workers_live > 0, { workers_live: h?.workers_live ?? null, workers: h?.workers ?? null });
 
 // 2 — one call, answer text inside the response
-if (!FAST) { say('SMOKE_FAIL every candidate model is quarantined'); say('SMOKE_SUMMARY ' + JSON.stringify({ total: 5, failed: 5 })); process.exit(2); }
+if (!FAST) { say('SMOKE_FAIL every candidate model is down'); say('SMOKE_SUMMARY ' + JSON.stringify({ total: 5, failed: 5 })); process.exit(2); }
 say('SMOKE_MODELS ' + JSON.stringify({ chosen: FAST, table: (table?.models || []).map((m) => `${m.model}:${m.status}:${m.verdict}`) }));
 
 const c1 = await invoke(FAST, 'Answer in one short sentence: what is 2+4?', 30_000);
