@@ -1,0 +1,28 @@
+name: cf-key-export
+on:
+  workflow_dispatch:
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    env:
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      ACC: d740a05e9442c1d0feacae2dfc673e93
+    steps:
+      - name: verify
+        run: |
+          curl -s -H "Authorization: Bearer $CF_API_TOKEN" https://api.cloudflare.com/client/v4/user/tokens/verify
+      - name: accounts
+        run: |
+          curl -s -H "Authorization: Bearer $CF_API_TOKEN" "https://api.cloudflare.com/client/v4/accounts" | jq -c '.result[]? | {id, name}'
+      - name: groups
+        run: |
+          curl -s -H "Authorization: Bearer $CF_API_TOKEN" "https://api.cloudflare.com/client/v4/user/tokens/permission_groups" | jq -c '[.result[]? | select(.name|test("Pages Edit|Workers Scripts Edit|KV Storage Edit|Tail Read|D1 Edit")) | {id,name}]'
+      - name: mint
+        run: |
+          G=$(curl -s -H "Authorization: Bearer $CF_API_TOKEN" "https://api.cloudflare.com/client/v4/user/tokens/permission_groups" | jq -c '[.result[]? | select(.name|test("Pages Edit|Workers Scripts Edit|KV Storage Edit|Tail Read|D1 Edit")) | .id]')
+          echo "groups=$G"
+          POLICY=$(jq -nc --arg acct "$ACC" --argjson g "$G" '{effect:"allow",resources:{("com.cloudflare.api.account."+$acct):"*"},permission_groups:[$g[]|{id:.}]}')
+          BODY=$(jq -nc --argjson p "$POLICY" '{name:"ladder-deploy-key-2026-10-05",policies:[$p]}')
+          curl -s -X POST -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" -d "$BODY" https://api.cloudflare.com/client/v4/user/tokens > /tmp/mint.json
+          echo "--- mint ---"
+          jq -r '.success, (.result.value // (.errors|tostring))' /tmp/mint.json
