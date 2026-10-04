@@ -41,12 +41,33 @@ if (!force && m.toDispatch <= 0) {
   process.exit(0);
 }
 if (force) console.log(`SCALE forced=true (verdict was toDispatch=${m.toDispatch}) — dispatching anyway`);
+const idleExit = Number(process.env.SCALE_IDLE_EXIT_MS || 0) || m.ttl_ms;
+
+// Where the worker comes from. `pool` (the default) asks the hub to scale: IT picks the next
+// repository from the ring round-robin and dispatches zen-pool.yml there, so the ceiling is a
+// property of the ring and every new job lands in another repository — a different egress IP,
+// i.e. a different slice of the free quota. `local` adds this repository itself: the path that
+// still works while the registry is empty, and the fallback when the hub refuses.
+const via = String(process.env.SCALE_VIA || 'pool').toLowerCase();
+if (via === 'pool') {
+  const demand = Number(process.env.SCALE_DEMAND || 0) || (force ? 2 : 0);
+  const r = await fetch(`${base}/zen/pool/scale`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ demand }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const b = await r.json().catch(() => ({}));
+  const repos = (b.dispatched || []).map((d) => d.repo);
+  console.log(`SCALE via=pool http=${r.status} demand=${demand} reason=${b.reason ?? '-'} `
+    + `toDispatch=${b.toDispatch ?? '-'} dispatched=${JSON.stringify(repos)} errors=${JSON.stringify(b.errors || [])}`);
+  if (!r.ok && !repos.length) process.exit(2);
+  process.exit(0);
+}
 if (!ghToken) {
   console.log('SCALE_NO_GITHUB_TOKEN — the workflow needs actions: write to dispatch zen-pool.yml');
   process.exit(3);
 }
-
-const idleExit = Number(process.env.SCALE_IDLE_EXIT_MS || 0) || m.ttl_ms;
 
 // workflow_dispatch, NOT repository_dispatch: the built-in GITHUB_TOKEN may start a workflow_dispatch
 // (measured — live run 37214710313 got as far as the API and was refused only for the repository
