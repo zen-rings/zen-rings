@@ -270,7 +270,7 @@ def render_markdown(r):
 
 
 def query_d1(sql, params, token, account, opener=None):
-    """POST one statement via the D1 REST API (same path scripts/query-trace.py uses)."""
+    """POST one statement via the D1 REST API."""
     base = f'https://api.cloudflare.com/client/v4/accounts/{account}'
     req = urllib.request.Request(
         f'{base}/d1/database', headers={'Authorization': f'Bearer {token}'})

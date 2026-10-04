@@ -11,8 +11,7 @@ import prices from '../config/prices.json' with { type: 'json' };
 
 // GET /v1/analytics: both bind ?1 = since (ms). Aggregates per requested ladder name;
 // the depth histogram is attempts-per-call from the attempts JSON (json_valid guards
-// legacy rows). Keep the bind: an interpolated timestamp is an injection (query-trace
-// guard tests the same rule for the python read path).
+// legacy rows). Keep the bind: an interpolated timestamp is an injection.
 const ANALYTICS_AGG_SQL =
   'SELECT ladder, COUNT(*) AS calls, SUM(1 - ok) AS failed, '
   + 'SUM(COALESCE(tokens_in, 0)) AS tin, SUM(COALESCE(tokens_out, 0)) AS tout, '
@@ -285,8 +284,8 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
   //
   // /v1/analytics answers "how did the ladder do"; this answers "what happened to THIS request":
   // which rungs were walked, in what order, what each one said, how long the whole thing took.
-  // Until now the only way to get that was scripts/query-trace.py from a laptop with a Cloudflare
-  // token — so a dead ladder call was unreadable for anyone but the operator holding that token.
+  // Until now the only way to get that was a python script on a laptop with a Cloudflare token
+  // — so a dead ladder call was unreadable for anyone but the operator holding that token.
   //
   // Every filter is bound (?1..?5), never interpolated: a trace id is caller-supplied. Requires at
   // least one filter — an unfiltered read of the whole log is what the analytics endpoint is for,
