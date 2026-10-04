@@ -15,6 +15,13 @@ name: zen-pool-scale
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'true = dispatch a worker even when the verdict says the pool is big enough (also the only path that works with an empty registry)'
+        default: 'false'
+      idle_exit_ms:
+        description: 'worker lifetime for this run (empty = the pool TTL of 167 min). Set it low for a test run.'
+        default: ''
   schedule:
     - cron: '*/2 * * * *'
 
@@ -50,6 +57,8 @@ jobs:
         env:
           ZEN_RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
           ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
+          SCALE_FORCE: ${{ inputs.force || 'false' }}
+          SCALE_IDLE_EXIT_MS: ${{ inputs.idle_exit_ms }}
         run: |
           set -uo pipefail
           node scripts/zen-pool-scale.mjs 2>&1 | tee scale.log
