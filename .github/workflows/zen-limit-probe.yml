@@ -20,6 +20,9 @@ on:
       model_after:
         description: 'fire one request at this model right after the first 429 (shared-bucket test)'
         default: ''
+      shards:
+        description: 'parallel runners (jobs). 1 = both streams in ONE job, i.e. one egress IP — the same-IP sharing test'
+        default: '2'
       delay_ms:
         description: 'delay between request starts per worker'
         default: '0'
@@ -37,9 +40,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: ${{ inputs.shards == 1 && '[1]' || '[1,2]' }}
     steps:
       - uses: actions/checkout@v4
+      # The free tier is metered per (egress IP, model), so the IP is part of every result: two
+      # shards that land on the same IP share one budget, two on different IPs do not.
+      - name: record egress ip
+        run: |
+          IP=$(curl -s --max-time 10 https://api.ipify.org || echo unknown)
+          echo "EGRESS_IP=$IP" >> "$GITHUB_ENV"
+          echo "POOL egress_ip runner=${{ matrix.shard }} ip=$IP" >> "$GITHUB_STEP_SUMMARY"
       - name: zen probe from runner ${{ matrix.shard }}
         run: |
           MODEL_AFTER_ARG=""

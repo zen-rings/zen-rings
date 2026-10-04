@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { handle } from '../src/handler.js';
 import {
   clampWaitMs, clampPullHoldMs, pullDecision, leaseExpired, leaseUsable,
+  lambdaPerMin, inflightFrom, desiredWorkers, scaleDecision,
   DEFAULT_WAIT_MS, MIN_WAIT_MS, MAX_WAIT_MS, DEFAULT_PULL_HOLD_MS,
+  POOL_CEILING, POOL_RESERVE, POOL_TTL_MS, SERVICE_MS_DEFAULT, BOOT_MS,
 } from '../src/zen-pool.js';
 
 const ENV = { ZEN_RUNNER_TOKEN: 'zen-tok' };
@@ -18,9 +20,13 @@ function fakeD1(seed = {}) {
   const tasks = new Map();
   const models = new Map((seed.models || []).map((m) => [m.model, m]));
   const budget = new Map((seed.budget || []).map((b) => [`${b.scope}|${b.model}`, b]));
+  const repos = new Map((seed.repos || []).map((r) => [r.repo, { enabled: 1, location: '', ...r }]));
+  const dispatches = new Map();
+  const meta = new Map(Object.entries(seed.meta || {}));
 
   const api = {
     _workers: workers, _tasks: tasks, _models: models, _budget: budget,
+    _repos: repos, _dispatches: dispatches, _meta: meta,
     prepare(sql) {
       let bound = [];
       const stmt = {
@@ -42,12 +48,20 @@ function fakeD1(seed = {}) {
     }
     if (/FROM zen_models WHERE model = \?1/.test(sql)) return models.get(p[0]) || null;
     if (/FROM zen_budget WHERE scope/.test(sql)) return budget.get(`${p[0]}|${p[1]}`) || null;
-    if (/COUNT\(\*\) AS n FROM zen_pool_tasks/.test(sql)) return { n: [...tasks.values()].filter((t) => t.state === p[0]).length };
+    if (/COUNT\(\*\) AS n FROM zen_pool_tasks WHERE state/.test(sql)) return { n: [...tasks.values()].filter((t) => t.state === p[0]).length };
+    if (/COUNT\(\*\) AS n FROM zen_pool_tasks WHERE enqueued_at/.test(sql)) return { n: [...tasks.values()].filter((t) => t.enqueued_at > p[0]).length };
+    if (/COUNT\(\*\) AS n FROM zen_pool_dispatches/.test(sql)) return { n: [...dispatches.values()].filter((d) => d.requested_at > p[0]).length };
+    if (/COUNT\(\*\) AS n FROM zen_pool_workers WHERE registered_at/.test(sql)) return { n: [...workers.values()].filter((w) => w.registered_at > p[0]).length };
+    if (/FROM zen_meta WHERE k = \?1/.test(sql)) { const v = meta.get(p[0]); return v === undefined ? null : { v }; }
     return null;
   }
   function all(sql, p) {
     if (/FROM zen_pool_workers WHERE state = \?1 AND lease_expires_at/.test(sql)) {
       return [...workers.values()].filter((w) => w.state === p[0] && w.lease_expires_at > p[1]);
+    }
+    if (/FROM zen_repos WHERE enabled = 1/.test(sql)) return [...repos.values()].filter((r) => r.enabled);
+    if (/FROM zen_pool_dispatches ORDER BY requested_at DESC/.test(sql)) {
+      return [...dispatches.values()].sort((a, b) => b.requested_at - a.requested_at).slice(0, p[0]);
     }
     return [];
   }
@@ -121,6 +135,15 @@ function fakeD1(seed = {}) {
         day_count: sameDay ? prev.day_count + 1 : 1,
         day: d,
       });
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (/INSERT INTO zen_pool_dispatches/.test(sql)) {
+      const [id, repo, reason, requestedAt, state] = p;
+      dispatches.set(id, { id, repo, reason, requested_at: requestedAt, worker_id: null, state });
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (/INSERT INTO zen_meta/.test(sql)) {
+      meta.set(p[0], p[1]);
       return { success: true, meta: { changes: 1 } };
     }
     return { success: true, meta: { changes: 0 } };
@@ -267,4 +290,129 @@ test('an explicit call is NOT blocked by the quarantine — only the budget is',
   const b = await post('/zen/pool/invoke', { model: 'nemotron-3.5-lightning-free', prompt: 'x' }, full);
   assert.equal(b.status, 429);
   assert.match((await b.json()).error, /budget/);
+});
+
+// ---- autoscaling (Ф8: scale up the moment the queue is not empty) -----------------------------
+
+test('lambda: arrivals per minute from a window count', () => {
+  assert.equal(lambdaPerMin(0), 0);
+  assert.equal(lambdaPerMin(5, 60_000), 5);
+  assert.equal(lambdaPerMin(225, 5 * 60_000), 45);   // the measured λ≈45/min at a 5-min window
+  assert.equal(lambdaPerMin(10, 0), 0);              // a zero window is not a measurement
+});
+
+test('inflight: dispatches in the boot window minus workers that already registered, never negative', () => {
+  assert.equal(inflightFrom({ recentDispatches: 3, recentRegistrations: 1 }), 2);
+  assert.equal(inflightFrom({ recentDispatches: 1, recentRegistrations: 2 }), 0);
+  assert.equal(inflightFrom({}), 0);
+});
+
+test('desired workers: Ф8 boots one on a cold queue, Little law sizes a sustained λ, the ceiling holds', () => {
+  // a cold pool with one call: one worker, not the whole reserve
+  assert.equal(desiredWorkers({ queued: 0, demand: 1, live: 0 }), 1);
+  // a non-empty queue always adds a worker (Ф8), even if one is already live
+  assert.equal(desiredWorkers({ queued: 1, live: 1 }), 2);
+  // λ=45/min, τ=10 s -> N=ceil(450/60)=8 (the reserve is headroom under the ceiling, not a floor)
+  assert.equal(desiredWorkers({ queued: 1, lambdaPerMin: 45, serviceMs: SERVICE_MS_DEFAULT }), 8);
+  // never above ceiling minus reserve: the account has 20 job slots, two stay for ordinary CI
+  assert.equal(desiredWorkers({ queued: 100, lambdaPerMin: 10_000 }), POOL_CEILING - POOL_RESERVE);
+  // an empty queue never scales up
+  assert.equal(desiredWorkers({ queued: 0, live: 3 }), 3);
+});
+
+test('scale decision: names why it dispatches, and nothing boots while a worker is in flight', () => {
+  const cold = scaleDecision({ queued: 0, demand: 1, live: 0 });
+  assert.equal(cold.toDispatch, 1);
+  assert.equal(cold.reason, 'queue_not_empty');
+  const inflight = scaleDecision({ queued: 1, live: 0, inflight: 1 });
+  assert.equal(inflight.toDispatch, 0);
+  const atCeiling = scaleDecision({ queued: 50, live: POOL_CEILING - POOL_RESERVE });
+  assert.equal(atCeiling.toDispatch, 0);
+  assert.equal(atCeiling.reason, 'at_ceiling');
+});
+
+const RING = { repo: 'ring/one', token_ref: 'env:RING_TOKEN' };
+function fakeGithub() {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), body: JSON.parse(init.body) });
+    return new Response(null, { status: 204 });   // 204 must carry a null body
+  };
+  return { calls, fetchImpl };
+}
+const postF = (path, body, d1, fetchImpl, extra = {}) =>
+  handle(new Request(`https://l.test${path}`, {
+    method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify(body),
+  }), env(d1, extra), { fetchImpl });
+
+test('scale: dispatches zen-pool into a ring repo, records it, and does not double-dispatch while it boots', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const gh = fakeGithub();
+  const extra = { RING_TOKEN: 'gh-tok' };
+
+  const res = await postF('/zen/pool/scale', { demand: 1 }, d1, gh.fetchImpl, extra);
+  assert.equal(res.status, 200);
+  const out = await res.json();
+  assert.equal(out.dispatched.length, 1);
+  assert.equal(out.dispatched[0].repo, 'ring/one');
+  assert.equal(out.ttl_ms, POOL_TTL_MS);
+  assert.equal(gh.calls.length, 1);
+  assert.match(gh.calls[0].url, /repos\/ring\/one\/dispatches$/);
+  assert.equal(gh.calls[0].body.event_type, 'zen-pool');
+  assert.equal(gh.calls[0].body.client_payload.idle_exit_ms, POOL_TTL_MS);
+
+  // the worker is booting: a second call inside the boot window must dispatch nothing
+  const again = await postF('/zen/pool/scale', { demand: 1 }, d1, gh.fetchImpl, extra);
+  const out2 = await again.json();
+  assert.equal(out2.dispatched.length, 0);
+  assert.equal(out2.inflight, 1);
+  assert.equal(gh.calls.length, 1);
+});
+
+test('scale: with no ring repo it says so instead of pretending to boot', async () => {
+  const d1 = fakeD1();
+  const gh = fakeGithub();
+  const res = await postF('/zen/pool/scale', { demand: 1 }, d1, gh.fetchImpl);
+  assert.equal(res.status, 503);
+  const out = await res.json();
+  assert.equal(out.reason, 'no_ring_repo');
+  assert.equal(gh.calls.length, 0);
+});
+
+test('metrics: λ from the task table, the ceiling and the verdict, in one answer', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  for (let i = 0; i < 3; i++) d1._tasks.set(`t${i}`, { id: `t${i}`, state: 'queued', enqueued_at: NOW - 1000 });
+  const res = await get('/zen/pool/metrics', d1);
+  assert.equal(res.status, 200);
+  const m = await res.json();
+  assert.equal(m.lambda_count, 3);
+  assert.equal(m.lambda_per_min, 0.6);   // 3 arrivals over the 5-min window
+  assert.equal(m.queued, 3);
+  assert.equal(m.ceiling, POOL_CEILING);
+  assert.equal(m.reserve, POOL_RESERVE);
+  assert.equal(m.autoscale, true);
+  assert.equal(m.toDispatch, 1);         // Ф8: the queue is not empty and nothing is live
+});
+
+test('cold start: invoke on an empty pool boots a worker and the answer still lands in the same call', async () => {
+  const d1 = fakeD1({ repos: [RING] });
+  const gh = fakeGithub();
+  const extra = { RING_TOKEN: 'gh-tok' };
+  const pending = postF('/zen/pool/invoke', { model: 'nemotron-3.5-lightning-free', prompt: '2+4?', wait_ms: 5000 }, d1, gh.fetchImpl, extra);
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(gh.calls.length, 1);   // the cold call itself triggered the boot
+
+  // the booted worker registers and pulls the task the cold call enqueued
+  const reg = await post('/zen/pool/register', { worker_id: 'ring/one:9:1', repo: 'ring/one' }, d1, extra);
+  const lease = await reg.json();
+  const pulled = await get(`/zen/pool/pull?lease=${lease.lease_id}&hold_ms=5000`, d1);
+  const task = (await pulled.json()).task;
+  assert.ok(task);
+  await post('/zen/pool/result', { task_id: task.id, ok: true, text: 'six', provider_ms: 2100, served_ms: 2300 }, d1, extra);
+
+  const res = await pending;
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.text, 'six');
+  assert.equal(body.cold_start.dispatched[0], 'ring/one');
 });

@@ -1,0 +1,63 @@
+name: zen-pool-scale
+# The scheduled half of the Zen Pool autoscaler.
+#
+# /zen/pool/invoke already scales on demand (Ф8: a call on a cold pool boots a worker and the
+# caller's own watchdog covers the ~10-13 s boot). This workflow covers the other two cases:
+#   - a queue that filled up while nobody was calling (the caller already got its 504/503 and
+#     the tasks are still waiting);
+#   - observability: it prints the metrics table (λ, queue, live, verdict) on every run, so the
+#     pool's behaviour over time is readable from the Actions history without opening the database.
+#
+# It scales by dispatching zen-pool.yml in THIS repository — every ring member can add itself to
+# the pool, which is what makes the ceiling a property of the ring and not of one repo.
+#
+# Needs `actions: write` for repository_dispatch and the ZEN_RUNNER_TOKEN secret.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/2 * * * *'
+
+concurrency:
+  group: zen-pool-scale
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  scale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: check node
+        id: nodecheck
+        run: |
+          if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge 22 ]; then
+            echo "need_setup=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "need_setup=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v4
+        if: steps.nodecheck.outputs.need_setup == 'true'
+        with:
+          node-version: 22
+
+      - name: read metrics and scale
+        env:
+          ZEN_RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
+          ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
+        run: |
+          set -uo pipefail
+          node scripts/zen-pool-scale.mjs 2>&1 | tee scale.log
+          exit ${PIPESTATUS[0]}
+
+      - name: summary
+        if: always()
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^SCALE' scale.log 2>/dev/null || cat scale.log 2>/dev/null || echo 'no log'
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
