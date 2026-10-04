@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS zen_runs (
   gh_status INTEGER,
   ok INTEGER,
   error TEXT,
+  answer TEXT,
   created_at INTEGER NOT NULL,
   reported_at INTEGER
 );

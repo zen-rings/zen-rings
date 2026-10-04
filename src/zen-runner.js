@@ -330,8 +330,8 @@ export async function zenReport(request, env) {
   const state = applyReport(prev, { ok: !!body?.ok, kind: body?.kind, error: body?.error }, now);
   await writeModel(env, model, state);
   if (body?.run_id) {
-    await env.ZEN_DB.prepare('UPDATE zen_runs SET status = ?1, ok = ?2, error = ?3, reported_at = ?4 WHERE id = ?5')
-      .bind('reported', body?.ok ? 1 : 0, state.last_error, now, String(body.run_id)).run();
+    await env.ZEN_DB.prepare('UPDATE zen_runs SET status = ?1, ok = ?2, error = ?3, answer = ?4, reported_at = ?5 WHERE id = ?6')
+      .bind('reported', body?.ok ? 1 : 0, state.last_error, String(body?.answer || '').slice(0, 4000), now, String(body.run_id)).run();
   }
   return j(200, { model, ...state, next_check_in: Math.max(0, state.next_check_at - now) });
 }
@@ -394,4 +394,17 @@ export async function zenSweep(env, fetchImpl = fetch) {
   }
   console.log(JSON.stringify({ route: 'zen/sweep', checked: out.length, out }));
   return { ok: true, checked: out.length, out };
+}
+
+// GET /zen/result/{run_id} — the answer text for one run, so the caller never has to read
+// the run log. 404 = unknown id or nothing reported yet.
+export async function zenResult(request, env, runId) {
+  const auth = await authorized(request, env);
+  if (!auth.ok) return j(auth.status, { error: auth.reason });
+  if (!env.ZEN_DB) return j(503, { error: 'zen database not configured' });
+  const row = await env.ZEN_DB.prepare(
+    'SELECT id, model, repo, status, ok, error, answer, created_at, reported_at FROM zen_runs WHERE id = ?1'
+  ).bind(String(runId)).first();
+  if (!row) return j(404, { error: 'run not found' });
+  return j(200, row);
 }

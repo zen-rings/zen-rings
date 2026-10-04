@@ -107,7 +107,7 @@ jobs:
           [ -n "${ZEN_RUNNER_URL:-}" ] && [ -n "${ZEN_RUNNER_TOKEN:-}" ] || { echo 'runner not configured — skipping report'; exit 0; }
           node -e "
             const r = require('./zen-serve.json');
-            const body = { run_id: process.argv[2], model: r.model, ok: r.ok, kind: r.kind, error: (r.error||'').slice(0,300) };
+            const body = { run_id: process.argv[2], model: r.model, ok: r.ok, kind: r.kind, error: (r.error||'').slice(0,300), answer: (r.text||'').slice(0,2000) };
             fetch(process.argv[3] + '/zen/report', { method: 'POST',
               headers: { authorization: 'Bearer ' + process.argv[4], 'content-type': 'application/json' },
               body: JSON.stringify(body) })

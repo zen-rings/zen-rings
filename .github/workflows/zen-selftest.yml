@@ -15,11 +15,10 @@ on:
       prompt:
         description: 'prompt for the live calls'
         default: 'Answer in one short sentence: what is 2+4?'
-  # Zen Runner dispatches here (POST /zen/run → repository_dispatch). This repo is one ring
-  # position: its Actions egress IP is one unit of the free-tier budget. client_payload carries
-  # {run_id, model, runs, location} — the runner names the model, this workflow never chooses.
+  # Own dispatch type — `zen-run` belongs to zen-serve. Sharing it meant every POST /zen/run
+  # started BOTH workflows (a heavy selftest job nobody asked for).
   repository_dispatch:
-    types: [zen-run]
+    types: [zen-selftest]
   schedule:
     # Every 6h = a fresh Azure egress IP per run, so each run gets its own free-tier budget
     # (spec §7 mode A). 15 models x 2 calls x 4 runs/day is ~120 requests — far under the ~940/day

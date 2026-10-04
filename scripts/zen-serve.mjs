@@ -98,6 +98,28 @@ console.log('SERVE_RESULT ' + JSON.stringify({
   provider_ms: record.provider_ms, chars: text.length, text: text.slice(0, 800),
   error: record.error, boot_ms: Date.now() - T0,
 }));
+
+// POST the answer back so GET /zen/result/{run_id} can serve it — the caller never has to
+// read the run log. Fire-and-forget: a failed report must not fail the job.
+const runnerUrl = process.env.ZEN_RUNNER_URL || '';
+const runnerToken = process.env.ZEN_RUNNER_TOKEN || '';
+const runId = process.env.ZEN_RUN_ID || '';
+if (runnerUrl && runnerToken && runId) {
+  try {
+    const resp = await fetch(runnerUrl + '/zen/report', {
+      method: 'POST',
+      headers: { authorization: 'Bearer ' + runnerToken, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        run_id: runId, model: args.model, ok: record.ok,
+        kind: record.kind, error: record.error, answer: text,
+      }),
+    });
+    console.log('REPORT ' + resp.status + ' ' + (await resp.text()).slice(0, 200));
+  } catch (e) {
+    console.log('REPORT failed: ' + e.message);
+  }
+}
+
 if (!record.ok) {
   console.log('NOTHING WAS VERIFIED — the provider did not return text for this model');
   process.exit(2);
