@@ -76,7 +76,8 @@ jobs:
           ZEN_DAILY_BUDGET: ${{ vars.ZEN_DAILY_BUDGET || '500' }}
         run: |
           set -uo pipefail
-          IDLE="${{ inputs.idle_exit || github.event.client_payload.idle_exit || '600000' }}"
+          # The pool dispatches idle_exit_ms (its TTL); a human dispatch sends idle_exit. Accept both.
+          IDLE="${{ inputs.idle_exit || github.event.client_payload.idle_exit || github.event.client_payload.idle_exit_ms || '600000' }}"
           MAXT="${{ inputs.max_tasks || github.event.client_payload.max_tasks || '0' }}"
           OUT="${{ inputs.out || github.event.client_payload.out || 'zen-pool-last.json' }}"
           echo "POOL serve_step $(date -u +%FT%TZ) idle_exit=$IDLE max_tasks=$MAXT" >> pool.log
