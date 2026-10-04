@@ -74,9 +74,12 @@ jobs:
               # The ladder repo is the source of truth for the worker code — pull from there, not
               # from this repo, so a worker change lands in the ring on the next sync. And always
               # overwrite: the old "skip if present" left stale workers serving empty prompts.
+              # The contents API needs the existing file's sha to overwrite it — without it the PUT
+              # answers 422 and the ring keeps the stale worker.
               content=$(curl -sS "https://raw.githubusercontent.com/trained-assist/trained-assist-llm-ladder/main/$f" | base64 -w0)
-              jq -n --arg msg "zen-pool: sync $f" --arg content "$content" \
-                '{message:$msg, content:$content, branch:"main"}' > /tmp/req.json
+              sha=$(curl -sS -H "authorization: Bearer $pat" "https://api.github.com/repos/$repo/contents/$f" | jq -r '.sha // empty')
+              jq -n --arg msg "zen-pool: sync $f" --arg content "$content" --arg sha "$sha" \
+                '{message:$msg, content:$content, branch:"main"} + (if $sha != "" then {sha:$sha} else {} end)' > /tmp/req.json
               code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X PUT \
                 -H "authorization: Bearer $pat" -H 'accept: application/vnd.github+json' -H 'content-type: application/json' \
                 "https://api.github.com/repos/$repo/contents/$f" --data @/tmp/req.json)
