@@ -22,6 +22,14 @@ on:
       idle_exit_ms:
         description: 'worker lifetime for this run (empty = the pool TTL of 167 min). Set it low for a test run.'
         default: ''
+      via:
+        description: 'pool = the hub dispatches into the ring (round-robin over repositories, so every new job gets a fresh egress IP); local = this repository adds itself'
+        type: choice
+        options: [pool, local]
+        default: pool
+      demand:
+        description: 'pool path only: how many workers the caller claims to need right now (0 = trust the λ/queue verdict)'
+        default: ''
   schedule:
     - cron: '*/2 * * * *'
 
@@ -59,6 +67,8 @@ jobs:
           ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
           SCALE_FORCE: ${{ inputs.force || 'false' }}
           SCALE_IDLE_EXIT_MS: ${{ inputs.idle_exit_ms }}
+          SCALE_VIA: ${{ inputs.via || 'pool' }}
+          SCALE_DEMAND: ${{ inputs.demand }}
           # GITHUB_TOKEN is NOT exported into the step environment on its own — without this
           # mapping the forced dispatch fails with SCALE_NO_GITHUB_TOKEN.
           GITHUB_TOKEN: ${{ github.token }}
