@@ -28,7 +28,9 @@ const byModel = new Map((table?.models || []).map((m) => [m.model, m]));
 // Candidates in order of how recently they were seen answering. A model that is NOT in the table
 // has never been judged, so its verdict is 'run' by definition — that is how nemotron-3-ultra-free
 // answered earlier today while every model IN the table was in quarantine.
-const CANDIDATES = ['nemotron-3-ultra-free', 'nemotron-3.5-lightning-free', 'mimo-v2.6-flash-free'];
+// space-bunny-free first: verified answering 200 from a plain client just now, while
+// longcat-2.5-preview / mimo-v2.5 / ling-3.1 all refuse with the 403 fingerprint error.
+const CANDIDATES = ['space-bunny-free', 'nemotron-3-ultra-free', 'nemotron-3.5-lightning-free', 'mimo-v2.6-flash-free'];
 const FAST = CANDIDATES.find((m) => byModel.get(m)?.verdict !== 'skip') || null;
 const SLOW = FAST;
 
