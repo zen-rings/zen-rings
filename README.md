@@ -99,7 +99,7 @@ Budgets are per model: 50 calls/min, 500/day, registry of 9 repos. `/zen/health`
 
 ```bash
 npm ci
-npm test                       # 161 tests, node:test, no runtime needed
+npm test                       # 159 tests, node:test, no runtime needed
 npm run gate                   # live gate: one pinned call per rung against prod
 npx wrangler dev               # local worker (cp .dev.vars.example .dev.vars first)
 
@@ -108,6 +108,14 @@ node scripts/check-client-contracts.mjs ~/.config/opencode/opencode.json <vm ope
 ```
 
 `main` is deployed by CI (tests → D1 schema → worker → smoke). Nothing else deploys.
+
+The deploy job needs four repository secrets — `CF_API_TOKEN`, `CF_ACCOUNT_ID`, `ZEN_RUNNER_TOKEN`,
+`ZEN_TOKEN_KEY`. Without `CF_API_TOKEN` the job does not fail the branch: it skips the deploy and
+says so in the run summary, so a fork without Cloudflare access stays green.
+
+`ZEN_TOKEN_KEY` is the key the pool registry's per-repo tokens are encrypted with. It is copied
+from the repository this project was seeded from and must not be regenerated: a new value makes
+every stored ring token undecryptable.
 
 Gate/live tokens come from `$LADDER_TOKEN` or `~/.llm-ladder-token` (chmod 600, outside the repo) —
 read them inside the script, never echo them into a prompt or a file in the repo.
