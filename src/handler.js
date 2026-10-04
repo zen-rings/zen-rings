@@ -245,6 +245,10 @@ export async function handle(request, env, { store, fetchImpl = fetch } = {}) {
   if (request.method === 'POST' && url.pathname === '/zen/report') return zen.zenReport(request, env);
   if (request.method === 'GET' && url.pathname.startsWith('/zen/result/')) return zen.zenResult(request, env, url.pathname.slice('/zen/result/'.length));
   if (request.method === 'POST' && url.pathname === '/zen/repos') return zen.zenRepos(request, env);
+  // Ring registry read-out: same table, different trust level. ZEN_RING_ADMIN_TOKEN, never given to
+  // a ring member — /zen/ring/payload is the only route that hands out plaintext tokens.
+  if (request.method === 'GET' && url.pathname === '/zen/ring/repos') return zen.zenRingRepos(request, env);
+  if (request.method === 'GET' && url.pathname === '/zen/ring/payload') return zen.zenRingPayload(request, env);
   // Zen Pool — a long-lived job as an API. Same token, same placement, before the ladder gate.
   if (request.method === 'GET' && url.pathname === '/zen/pool/health') return pool.zenPoolHealth(request, env);
   if (request.method === 'POST' && url.pathname === '/zen/pool/register') return pool.zenPoolRegister(request, env);

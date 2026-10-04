@@ -84,7 +84,9 @@ repo's job registers itself, gets a task and returns the answer.
 | GET | `/zen/health` | registry size + live caps (no auth) |
 | POST | `/zen/pool/invoke` | `{model,prompt,wait_ms?}` → 200 `{text}` — the pool as one API call (own token) |
 | GET | `/zen/pool/health` | how many jobs are live right now (no auth) |
-| POST | `/zen/repos` | registry row: repo + encrypted token, or `env:NAME` — the ring |
+| POST | `/zen/repos` | registry row: repo + encrypted token, or `env:NAME` — the ring (`ZEN_RING_ADMIN_TOKEN`) |
+| GET | `/zen/ring/repos` | the ring as it stands, no tokens in it (`ZEN_RING_ADMIN_TOKEN`) |
+| GET | `/zen/ring/payload` | the same list **with** plaintext tokens, decrypted in the worker — what provisioning reads (`ZEN_RING_ADMIN_TOKEN`, `no-store`) |
 | GET | `/zen/models` | availability table + call-it-or-skip-it verdict (auth) |
 | POST | `/zen/run` | `{model,runs?}` → 202 `run_id` · 409 quarantined · 429 budget · 502 GitHub (auth) |
 
@@ -94,6 +96,13 @@ zen-pool.yml`, `scripts/zen-client.mjs`, `scripts/zen-pool-worker.mjs` — provi
 `.github/workflows/zen-ring-sync.yml`, so the hub repo and the members never drift.
 
 Budgets are per model: 50 calls/min, 500/day, registry of 9 repos. `/zen/health` is the truth.
+
+**The ring lives in this worker's D1**, in `zen_repos` — not in a GitHub secret, not in a
+spreadsheet. `zen-ring-sync.yml` reads that table (`source: cf`), and `scripts/zen-ring.mjs` is the
+owner's interface to it (`list`, `add`, `disable`). Provisioning needs each repo's token, so the
+worker decrypts on request behind `ZEN_RING_ADMIN_TOKEN`; that token is never provisioned into a ring
+repo, and the low-privilege `ZEN_RUNNER_TOKEN` that every member *does* hold opens neither the
+registry nor the payload.
 
 ## Development
 
@@ -109,9 +118,11 @@ node scripts/check-client-contracts.mjs ~/.config/opencode/opencode.json <vm ope
 
 `main` is deployed by CI (tests → D1 schema → worker → smoke). Nothing else deploys.
 
-The deploy job needs four repository secrets — `CF_API_TOKEN`, `CF_ACCOUNT_ID`, `ZEN_RUNNER_TOKEN`,
-`ZEN_TOKEN_KEY`. Without `CF_API_TOKEN` the job does not fail the branch: it skips the deploy and
-says so in the run summary, so a fork without Cloudflare access stays green.
+The deploy job needs five repository secrets — `CF_API_TOKEN`, `CF_ACCOUNT_ID`, `ZEN_RUNNER_TOKEN`,
+`ZEN_TOKEN_KEY`, `ZEN_RING_ADMIN_TOKEN`. Without `CF_API_TOKEN` the job does not fail the branch: it
+skips the deploy and says so in the run summary, so a fork without Cloudflare access stays green.
+`ZEN_RING_ADMIN_TOKEN` is optional: without it the worker keeps `/zen/ring/*` closed and says so in a
+warning.
 
 `ZEN_TOKEN_KEY` is the key the pool registry's per-repo tokens are encrypted with. It was
 copied over from the repository this project was seeded from and must not be regenerated: a new

@@ -88,6 +88,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
           ZEN_TOKEN_KEY: ${{ secrets.ZEN_TOKEN_KEY }}
+          ZEN_RING_ADMIN_TOKEN: ${{ secrets.ZEN_RING_ADMIN_TOKEN }}
         # The controller token and the token-encryption key live in GitHub secrets and are pushed
         # to the worker here — they must never be plain `--var`s, which Cloudflare shows in the
         # dashboard. `secret put` is idempotent, so this runs on every deploy.
@@ -95,6 +96,13 @@ jobs:
           set -euo pipefail
           [ -n "$ZEN_RUNNER_TOKEN" ] && printf '%s' "$ZEN_RUNNER_TOKEN" | npx --yes wrangler@4 secret put ZEN_RUNNER_TOKEN
           [ -n "$ZEN_TOKEN_KEY" ] && printf '%s' "$ZEN_TOKEN_KEY" | npx --yes wrangler@4 secret put ZEN_TOKEN_KEY
+          # The ring-admin token opens the registry for writing and for the provisioning payload, so
+          # unlike the two above a missing one is not fatal — it just leaves /zen/ring/* closed.
+          if [ -n "$ZEN_RING_ADMIN_TOKEN" ]; then
+            printf '%s' "$ZEN_RING_ADMIN_TOKEN" | npx --yes wrangler@4 secret put ZEN_RING_ADMIN_TOKEN
+          else
+            echo "::warning title=Ring admin token missing::ZEN_RING_ADMIN_TOKEN is not set in this repository, so /zen/ring/repos and /zen/ring/payload stay closed."
+          fi
       - name: Apply trace schema
         if: steps.gate.outputs.deploy == 'true'
         env:

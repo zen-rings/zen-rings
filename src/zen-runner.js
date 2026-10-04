@@ -212,6 +212,20 @@ export async function authorized(request, env) {
   return { ok: true };
 }
 
+// Two levels of trust, deliberately not the same secret. ZEN_RUNNER_TOKEN is the low-privilege one:
+// it is provisioned into EVERY ring repository, so anything that can read one ring repo's CI secrets
+// can call /zen/run and spend the quota — and nothing more. ZEN_RING_ADMIN_TOKEN never leaves this
+// repository and the owner's terminal: it opens the registry for writing and the provisioning
+// payload, which carries the plaintext ring tokens. One token for both jobs would mean a compromised
+// ring repo could read every private repo's PAT.
+export async function authorizedAdmin(request, env) {
+  const want = env.ZEN_RING_ADMIN_TOKEN;
+  if (!want) return { ok: false, status: 503, reason: 'ring admin not configured (ZEN_RING_ADMIN_TOKEN missing)' };
+  const got = bearer(request);
+  if (!got || !timingSafeEqual(got, String(want).trim())) return { ok: false, status: 401, reason: 'unauthorized' };
+  return { ok: true };
+}
+
 // ---------------------------------------------------------------- routes
 
 export async function zenHealth(request, env) {
@@ -336,11 +350,13 @@ export async function zenReport(request, env) {
   return j(200, { model, ...state, next_check_in: Math.max(0, state.next_check_at - now) });
 }
 
-// POST /zen/repos { repo, token? | token_ref?, enabled?, location? } — the registry.
-// `token` is stored encrypted (AES-GCM, ZEN_TOKEN_KEY) and never returned or logged;
-// `token_ref: "env:NAME"` points at a token that already lives in a worker secret.
+// POST /zen/repos { repo, token? | token_ref?, enabled?, location? } — the registry, i.e. THE source
+// of truth for "which repositories are in the ring and with which token". `token` is stored
+// encrypted (AES-GCM, ZEN_TOKEN_KEY) and never returned or logged; `token_ref: "env:NAME"` points at
+// a token that already lives in a worker secret. Admin token only — rewriting the ring is not a
+// thing a ring member may do for itself.
 export async function zenRepos(request, env) {
-  const auth = await authorized(request, env);
+  const auth = await authorizedAdmin(request, env);
   if (!auth.ok) return j(auth.status, { error: auth.reason });
   if (!env.ZEN_DB) return j(503, { error: 'zen database not configured' });
   let body;
@@ -368,6 +384,51 @@ export async function zenRepos(request, env) {
   ).bind(repo, tokenEnc, tokenRef, enabled, location, now).run();
   const rows = (await env.ZEN_DB.prepare('SELECT repo, enabled, location, token_ref, (token_enc IS NOT NULL) AS has_token, last_dispatch_at FROM zen_repos ORDER BY added_at, repo').all()).results || [];
   return j(200, { ok: true, repo, repos: rows });
+}
+
+// GET /zen/ring/repos — the same registry for a human: no token, not even a hint of one.
+export async function zenRingRepos(request, env) {
+  const auth = await authorizedAdmin(request, env);
+  if (!auth.ok) return j(auth.status, { error: auth.reason });
+  if (!env.ZEN_DB) return j(503, { error: 'zen database not configured' });
+  const rows = (await env.ZEN_DB.prepare('SELECT repo, enabled, location, token_ref, (token_enc IS NOT NULL) AS has_token, last_dispatch_at FROM zen_repos ORDER BY added_at, repo').all()).results || [];
+  return j(200, { source: 'cf-d1', repos: rows.map((r) => ({ ...r, enabled: !!r.enabled })) });
+}
+
+// GET /zen/ring/payload — the provisioning list WITH the tokens, decrypted here, in the worker, on
+// request. This is what replaced the ZEN_RING_PAYLOAD GitHub secret: the ring lives in this
+// database, so provisioning reads it from the same place that dispatches the runs — no second copy
+// in GitHub, no Google Sheet, no agent in the loop.
+//
+// The response carries plaintext PATs, so: admin token only (never provisioned into a ring repo),
+// `no-store` so no cache keeps a copy, and the log line below holds counts only.
+export async function zenRingPayload(request, env) {
+  const auth = await authorizedAdmin(request, env);
+  if (!auth.ok) return j(auth.status, { error: auth.reason });
+  if (!env.ZEN_DB) return j(503, { error: 'zen database not configured' });
+  const rows = (await env.ZEN_DB.prepare('SELECT * FROM zen_repos ORDER BY added_at, repo').all()).results || [];
+  const repos = [];
+  for (const r of rows) {
+    const row = { repo: r.repo, location: r.location || '', enabled: !!r.enabled };
+    if (r.token_ref) {
+      // `env:NAME` rows keep the reference — that is what must be written back, or the row would
+      // freeze one copy of a secret that is meant to be rotated in place. `resolved_token` is for
+      // provisioning only and is never posted back.
+      row.token_ref = r.token_ref;
+      row.resolved_token = await resolveToken({ token_ref: r.token_ref }, env);
+    }
+    if (r.token_enc) {
+      try { row.token = await decryptToken(r.token_enc, env.ZEN_TOKEN_KEY); }
+      catch (e) { row.token_error = `cannot decrypt: ${String(e?.message || e).slice(0, 80)}`; }
+    }
+    repos.push(row);
+  }
+  console.log(JSON.stringify({
+    route: 'zen/ring/payload', rows: repos.length,
+    with_token: repos.filter((r) => r.token || r.resolved_token).length,
+    unusable: repos.filter((r) => !r.token && !r.resolved_token).map((r) => r.repo),
+  }));
+  return j(200, { source: 'cf-d1', repos }, { 'cache-control': 'no-store' });
 }
 
 // Cron sweep (every 15 min): re-check at most ZEN_SWEEP_MAX quarantined models whose backoff has
