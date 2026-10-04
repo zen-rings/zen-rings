@@ -1,0 +1,134 @@
+name: zen-serve
+# The smallest useful launcher: ONE GitHub Actions run = ONE inference call, answer in the log.
+#
+# Why it exists: /zen/run dispatches into this repo, but a dispatched run is not an API. Nothing
+# about a GitHub-hosted runner is reachable from the outside — no inbound address, no port, no URL
+# is ever handed back at dispatch time. So the direction is inverted on purpose: the caller POSTs
+# a task to the ladder worker, this run pulls the task out of the event payload, calls zen, and
+# writes the answer where the caller can read it (run log + artifact + POST /zen/report).
+#
+# t_boot is the number this workflow is built to measure. A dispatched run is not alive when GitHub
+# returns 202: it still has to be scheduled onto a runner, check out, get a Node and only then
+# touch zen. Every stage below stamps an absolute UTC time into boot.log, so the cold start is a
+# measurement, not an assumption.
+
+on:
+  # Zen Runner dispatches here: POST /zen/run -> repository_dispatch with
+  # client_payload {run_id, model, runs, location}. The caller names the model; nothing is swapped.
+  repository_dispatch:
+    types: [zen-run]
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'model id, e.g. nemotron-3.5-lightning-free'
+        required: true
+      prompt:
+        description: 'prompt'
+        default: 'Answer in one short sentence: what is 2+4?'
+      max_tokens:
+        description: 'max tokens'
+        default: '300'
+
+# Two serves must never cancel each other: every dispatch is a distinct caller waiting for an
+# answer. Grouping by run_id keeps a retry from killing the request it is retrying.
+concurrency:
+  group: zen-serve-${{ github.event.client_payload.run_id || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  serve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: mark job start
+        run: echo "BOOT job_start $(date -u +%FT%TZ) runner=${RUNNER_NAME} os=${RUNNER_OS} image=${ImageOS:-?}/${ImageVersion:-?}" >> boot.log
+
+      - uses: actions/checkout@v4
+      - name: mark checkout
+        run: echo "BOOT checkout_done $(date -u +%FT%TZ)" >> boot.log
+
+      # The GitHub image already ships Node; setup-node only runs when what is there is too old.
+      # On a cold start every avoided second is a second of the caller's wait.
+      - name: check node
+        id: nodecheck
+        run: |
+          echo "BOOT node_check $(date -u +%FT%TZ) have=$(node -v 2>/dev/null || echo none)" >> boot.log
+          if command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)" -ge 22 ]; then
+            echo "need_setup=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "need_setup=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.nodecheck.outputs.need_setup == 'true'
+        with:
+          node-version: 22
+
+      - name: mark node ready
+        run: echo "BOOT node_ready $(date -u +%FT%TZ) node=$(node -v)" >> boot.log
+
+      # The free tier is metered per (egress IP, model), so the IP is part of the result, not a
+      # detail: two runners landing on one IP share one budget and the second looks rate-limited.
+      - name: record egress ip
+        run: echo "ZEN_EGRESS_IP=$(curl -s --max-time 10 https://api.ipify.org || echo unknown)" >> "$GITHUB_ENV"
+
+      - name: serve
+        id: serve
+        env:
+          ZEN_RUN_ID: ${{ github.event.client_payload.run_id }}
+          ZEN_RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
+          ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
+        run: |
+          set -uo pipefail
+          MODEL="${{ inputs.model || github.event.client_payload.model }}"
+          PROMPT="${{ inputs.prompt || github.event.client_payload.prompt }}"
+          MAXTOK="${{ inputs.max_tokens || '300' }}"
+          ARGS=(--max-tokens "$MAXTOK")
+          [ -n "$MODEL" ] && ARGS+=(--model "$MODEL")
+          [ -n "$PROMPT" ] && ARGS+=(--prompt "$PROMPT")
+          echo "BOOT serve_step $(date -u +%FT%TZ) model=$MODEL" >> boot.log
+          node scripts/zen-serve.mjs "${ARGS[@]}" --out zen-serve.json
+          RC=$?
+          echo "BOOT serve_done $(date -u +%FT%TZ) rc=$RC" >> boot.log
+          exit $RC
+
+      - name: report to zen runner
+        if: always() && github.event_name == 'repository_dispatch'
+        env:
+          ZEN_RUN_ID: ${{ github.event.client_payload.run_id }}
+          ZEN_RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
+          ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
+        run: |
+          # ok / kind / error is exactly what the ladder reads back to decide "call it now" vs
+          # "come back later"; without it the model table stays empty and every model looks unknown.
+          [ -n "${ZEN_RUNNER_URL:-}" ] && [ -n "${ZEN_RUNNER_TOKEN:-}" ] || { echo 'runner not configured — skipping report'; exit 0; }
+          node -e "
+            const r = require('./zen-serve.json');
+            const body = { run_id: process.argv[2], model: r.model, ok: r.ok, kind: r.kind, error: (r.error||'').slice(0,300) };
+            fetch(process.argv[3] + '/zen/report', { method: 'POST',
+              headers: { authorization: 'Bearer ' + process.argv[4], 'content-type': 'application/json' },
+              body: JSON.stringify(body) })
+              .then(async x => console.log('report ' + x.status + ' ' + (await x.text()).slice(0, 200)))
+              .catch(e => console.log('report failed: ' + e.message));
+          " "$ZEN_RUN_ID" "$ZEN_RUNNER_URL" "$ZEN_RUNNER_TOKEN"
+
+      - name: boot summary
+        if: always()
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo 'boot marks (dispatch time is the caller'"'"'s own clock)' >> "$GITHUB_STEP_SUMMARY"
+          cat boot.log >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat boot.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zen-serve-${{ github.event.client_payload.run_id || github.run_id }}
+          path: |
+            zen-serve.json
+            boot.log
+          retention-days: 30
