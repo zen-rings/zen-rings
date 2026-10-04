@@ -15,6 +15,11 @@
 
 const base = (process.env.ZEN_RUNNER_URL || 'https://llm-ladder.trainedassist.store').replace(/\/+$/, '');
 const token = String(process.env.ZEN_RUNNER_TOKEN || '').trim();
+const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+const out = [];
+const say = (line) => { console.log(line); out.push(line); };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // Which model to use is decided from the live table, not from a constant: the whole point of the
 // quarantine is that any given model may be silent today, and a smoke test that hardcodes one would
 // fail for a reason that has nothing to do with the pool.
@@ -22,10 +27,6 @@ const table = await fetch(`${base}/zen/models`, { headers }).then((r) => r.json(
 const runnable = (table?.models || []).filter((m) => m.verdict === 'run');
 const FAST = runnable[0]?.model || null;
 const SLOW = FAST;
-const out = [];
-const say = (line) => { console.log(line); out.push(line); };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
 
 if (!token) { say('SMOKE_FAIL missing ZEN_RUNNER_TOKEN'); process.exit(3); }
 
