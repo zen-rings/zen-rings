@@ -160,8 +160,10 @@ jobs:
             else
               # `enabled` comes from the row: the registry carries switched-off rows too, and
               # mode=register must not silently put one back in the ring (that is exactly how a repo
-              # with no zen-run trigger got re-enabled on the first cf run).
-              jq -c '{repo, location:(.location // ""), enabled:(.enabled // true)}
+              # with no zen-run trigger got re-enabled on the first cf run). Compare against `false`
+              # explicitly — jq's `//` treats false as empty, so `(.enabled // true)` would flip it
+              # back to true.
+              jq -c '{repo, location:(.location // ""), enabled:(.enabled != false)}
                      + (if .token then {token:.token} else {} end)
                      + (if .token_ref then {token_ref:.token_ref} else {} end)' <<<"$row" > /tmp/body.json
             fi
