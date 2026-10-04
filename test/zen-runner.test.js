@@ -43,6 +43,7 @@ function fakeD1(seed = {}) {
     if (/FROM zen_models WHERE model = \?1/.test(sql)) return models.get(p[0]) || null;
     if (/FROM zen_budget WHERE scope/.test(sql)) return budget.get(`${p[0]}|${p[1]}`) || null;
     if (/FROM zen_meta WHERE k = 'repo_cursor'/.test(sql)) return meta.has('repo_cursor') ? { v: meta.get('repo_cursor') } : null;
+    if (/FROM zen_runs WHERE id = \?1/.test(sql)) return runs.get(p[0]) || null;
     if (/COUNT\(\*\) AS n FROM zen_repos WHERE enabled = 1/.test(sql)) return { n: repos.filter((r) => r.enabled).length };
     if (/COUNT\(\*\) AS n FROM zen_models/.test(sql)) return { n: models.size };
     if (/SELECT repo, enabled/.test(sql)) return null;
@@ -101,7 +102,7 @@ function fakeD1(seed = {}) {
       runs.set(p[0], { id: p[0], model: p[1], repo: p[2], location: p[3], status: p[4], created_at: p[5] });
       return;
     }
-    if (/UPDATE zen_runs SET status/.test(sql)) { const r = runs.get(p[4]); if (r) { r.status = p[0]; r.ok = p[1]; } return; }
+    if (/UPDATE zen_runs SET status/.test(sql)) { const r = runs.get(p[5]); if (r) { r.status = p[0]; r.ok = p[1]; r.answer = p[3]; } return; }
     if (/UPDATE zen_models SET next_check_at/.test(sql)) { const m = models.get(p[1]); if (m) m.next_check_at = p[0]; return; }
   }
   return api;
@@ -342,4 +343,25 @@ test('budget caps are configurable per environment, defaults are the owner numbe
   }), env(d1, { GH_ONE: 't', ...extra }), { fetchImpl: fakeGh() });
   assert.equal((await call({ ZEN_PER_MIN: '10' })).status, 202, '9 of 10 — still allowed');
   assert.equal((await call({ ZEN_PER_MIN: '9' })).status, 429, 'the cap is a variable, not a constant');
+});
+
+test('GET /zen/result/{run_id}: the answer text is readable without the run log', async () => {
+  const d1 = fakeD1();
+  // The row exists first: POST /zen/run created it, the runner reported back against it. A report
+  // for an unknown run_id updates zero rows — exactly like the real D1.
+  d1._runs.set('run-1', { id: 'run-1', model: 'm-free', repo: 'acme/pool', location: 'eu', status: 'dispatched', created_at: NOW });
+  const report = (body) => handle(new Request('https://l.test/zen/report', {
+    method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify(body),
+  }), env(d1));
+
+  await report({ run_id: 'run-1', model: 'm-free', ok: true, answer: 'Paris is the capital of France.' });
+  const r = await get('/zen/result/run-1', d1);
+  assert.equal(r.status, 200);
+  const b = await r.json();
+  assert.equal(b.answer, 'Paris is the capital of France.');
+  assert.equal(b.model, 'm-free');
+  assert.equal(b.status, 'reported');
+
+  const missing = await get('/zen/result/nope', d1);
+  assert.equal(missing.status, 404);
 });
