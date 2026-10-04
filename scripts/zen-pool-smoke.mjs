@@ -15,8 +15,13 @@
 
 const base = (process.env.ZEN_RUNNER_URL || 'https://llm-ladder.trainedassist.store').replace(/\/+$/, '');
 const token = String(process.env.ZEN_RUNNER_TOKEN || '').trim();
-const FAST = process.env.SMOKE_FAST_MODEL || 'nemotron-3.5-lightning-free';
-const SLOW = process.env.SMOKE_SLOW_MODEL || 'mimo-v2.6-flash-free';
+// Which model to use is decided from the live table, not from a constant: the whole point of the
+// quarantine is that any given model may be silent today, and a smoke test that hardcodes one would
+// fail for a reason that has nothing to do with the pool.
+const table = await fetch(`${base}/zen/models`, { headers }).then((r) => r.json()).catch(() => null);
+const runnable = (table?.models || []).filter((m) => m.verdict === 'run');
+const FAST = runnable[0]?.model || null;
+const SLOW = FAST;
 const out = [];
 const say = (line) => { console.log(line); out.push(line); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -57,6 +62,9 @@ const h = await waitForWorker();
 record('warm_job_registered', h?.workers_live > 0, { workers_live: h?.workers_live ?? null, workers: h?.workers ?? null });
 
 // 2 — one call, answer text inside the response
+if (!FAST) { say('SMOKE_FAIL no runnable model in /zen/models — every model is quarantined'); say('SMOKE_SUMMARY ' + JSON.stringify({ total: 5, failed: 5 })); process.exit(2); }
+say('SMOKE_MODELS ' + JSON.stringify({ runnable: runnable.map((m) => m.model), skipped: (table?.models || []).filter((m) => m.verdict !== 'run').map((m) => `${m.model}:${m.status}`) }));
+
 const c1 = await invoke(FAST, 'Answer in one short sentence: what is 2+4?', 30_000);
 record('answer_text_in_response', c1.http === 200 && !!c1.body.text, {
   http: c1.http, elapsed_ms: c1.elapsed_ms, served_ms: c1.body.served_ms, provider_ms: c1.body.provider_ms,
@@ -72,7 +80,10 @@ record('second_call_same_job', c2.http === 200 && !!c2.body.text && c2.body.work
 });
 
 // 4 — the caller's watchdog fires, the answer still arrives
-const slow = await invoke(SLOW, 'Answer in one short sentence: what is 2+4?', 2000);
+// The watchdog test needs an answer that takes longer than the caller's 2 s. Rather than betting
+// on one slow model, ask for a long generation on whatever model is alive — a 400-token essay
+// costs seconds on any of them, and the point is the TIMING, not the model.
+const slow = await invoke(SLOW, 'Write a 400-word essay about the history of the Roman Empire.', 2000);
 let late = null;
 if (slow.http === 504 && slow.body.task_id) {
   const deadline = Date.now() + 90_000;
