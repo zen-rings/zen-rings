@@ -21,7 +21,7 @@
 // Usage: node scripts/zen-pool-prune.mjs [--keep-hours 6] [--max-runs 20] [--dry-run]
 //        (needs GITHUB_REPOSITORY and GITHUB_TOKEN, both set by the workflow)
 
-import { planPrune, cutoffIso } from './ring-hygiene.mjs';
+import { planPrune, cutoffIso } from './zen-pool-policy.mjs';
 
 const API = 'https://api.github.com';
 const GH_HEADERS = {
