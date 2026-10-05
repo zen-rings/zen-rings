@@ -1,6 +1,6 @@
 # Zen Runner — контролер запуска тестов свободных моделей
 
-Дата: 4 октября 2026. Живёт в том же воркере, что и лестница: `https://llm-ladder.trainedassist.store`.
+Дата: 4 октября 2026. Живёт в собственном воркере `zen-rings`: `https://zen-rings.trainedassist.store` — отдельно от воркера лестницы компании `trained-assist-llm-ladder` (`llm-ladder.trainedassist.store`).
 
 ## Зачем он нужен
 
