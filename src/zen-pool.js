@@ -12,7 +12,7 @@
 //
 // Dependency-free of the Workerd runtime (same rule as handler.js) so `node --test` runs it.
 
-import { applyReport, budgetVerdict, LIMITS, readModel, writeModel, bumpCount, readCounts, authorized, resolveToken, pickNextRepo } from './zen-runner.js';
+import { applyReport, budgetVerdict, LIMITS, readModel, writeModel, bumpCount, readCounts, authorized, resolveToken, pickNextRepo, sharedDayCap } from './zen-runner.js';
 
 export const DEFAULT_WAIT_MS = 30_000;   // the owner's default watchdog
 export const MIN_WAIT_MS = 1_000;
@@ -486,10 +486,13 @@ export async function zenPoolInvoke(request, env, fetchImpl = fetch) {
     }
   }
   const repoScope = workers[0]?.repo || coldStart?.dispatched?.[0]?.repo || '*';
+  // Same two levels as /zen/run: the day cap is per (repo, model), and '*' is only the runaway
+  // brake — its day cap is the sum of the independent per-model allowances, so one provider's
+  // spending never refuses another provider.
   const perRepo = budgetVerdict(await readCounts(env, repoScope, model), now,
     { perMin: Number(env.ZEN_PER_MIN) || LIMITS.perMin, perDay: Number(env.ZEN_PER_DAY) || LIMITS.perDay });
   const perAll = budgetVerdict(await readCounts(env, '*', '*'), now,
-    { perMin: Number(env.ZEN_PER_MIN) || LIMITS.perMin, perDay: Number(env.ZEN_PER_DAY) || LIMITS.perDay });
+    { perMin: Number(env.ZEN_PER_MIN) || LIMITS.perMin, perDay: await sharedDayCap(env, now, Number(env.ZEN_PER_DAY) || LIMITS.perDay) });
   for (const v of [perRepo, perAll]) {
     if (!v.ok) return j(429, { error: `budget exhausted (${v.reason})`, reason: v.reason, retry_after: v.retry_after });
   }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { handle } from '../src/handler.js';
 import {
   nextCheckAt, applyReport, budgetVerdict, pickNextRepo, encryptToken, decryptToken, LIMITS, LADDERS,
+  sharedDayCap,
 } from '../src/zen-runner.js';
 
 const ENV = { ZEN_RUNNER_TOKEN: 'zen-tok', ZEN_TOKEN_KEY: Buffer.alloc(32, 7).toString('base64') };
@@ -48,6 +49,10 @@ function fakeD1(seed = {}) {
     if (/FROM zen_runs WHERE id = \?1/.test(sql)) return runs.get(p[0]) || null;
     if (/COUNT\(\*\) AS n FROM zen_repos WHERE enabled = 1/.test(sql)) return { n: repos.filter((r) => r.enabled).length };
     if (/COUNT\(\*\) AS n FROM zen_models/.test(sql)) return { n: models.size };
+    if (/COUNT\(\*\) AS n FROM zen_budget WHERE model <> \?1 AND day = \?2/.test(sql)) {
+      const [skipModel, d] = p;
+      return { n: [...budget.values()].filter((b) => b.model !== skipModel && b.day === d).length };
+    }
     if (/SELECT repo, enabled/.test(sql)) return null;
     return null;
   }
@@ -169,19 +174,40 @@ test('applyReport: success resets everything; hard kind repeats → down; soft k
   assert.equal(f.next_check_at - NOW, LADDERS.flaky[0]);
 });
 
-test('budgetVerdict: 50/min and 500/day, rolling minute + UTC day', () => {
+test('budgetVerdict: 50/min and 700/day, rolling minute + UTC day', () => {
   assert.equal(LIMITS.perMin, 50);
-  assert.equal(LIMITS.perDay, 500);
+  assert.equal(LIMITS.perDay, 700);
   assert.equal(budgetVerdict({ minute_count: 49, minute_at: NOW, day_count: 0, day: '2026-10-04' }, NOW).ok, true);
   const m = budgetVerdict({ minute_count: 50, minute_at: NOW, day_count: 0, day: '2026-10-04' }, NOW);
   assert.equal(m.ok, false);
   assert.equal(m.reason, 'minute');
   assert.equal(m.retry_after, 60_000);
-  const d = budgetVerdict({ minute_count: 0, minute_at: 0, day_count: 500, day: '2026-10-04' }, NOW);
+  assert.equal(budgetVerdict({ minute_count: 0, minute_at: 0, day_count: 699, day: '2026-10-04' }, NOW).ok, true,
+    'the 700th call of the day is still allowed');
+  const d = budgetVerdict({ minute_count: 0, minute_at: 0, day_count: 700, day: '2026-10-04' }, NOW);
   assert.equal(d.reason, 'day');
   assert.ok(d.retry_after > 0 && d.retry_after <= 86_400_000, 'retry_after points at the next UTC midnight');
   // a stale minute window and a day from yesterday both read as free
-  assert.equal(budgetVerdict({ minute_count: 50, minute_at: NOW - 61_000, day_count: 500, day: '2026-10-03' }, NOW).ok, true);
+  assert.equal(budgetVerdict({ minute_count: 50, minute_at: NOW - 61_000, day_count: 700, day: '2026-10-03' }, NOW).ok, true);
+});
+
+test('sharedDayCap: the shared counter gets the SUM of the independent per-model allowances, plus one', async () => {
+  const day = '2026-10-04';
+  const one = fakeD1({ budget: [{ scope: 'o/one', model: 'mimo-v2.6-flash-free', minute_count: 3, minute_at: NOW, day_count: 700, day }] });
+  assert.equal(await sharedDayCap({ ZEN_DB: one }, NOW), 1400, 'one spent provider must leave room for the next one');
+  const two = fakeD1({ budget: [
+    { scope: 'o/one', model: 'mimo-v2.6-flash-free', minute_count: 3, minute_at: NOW, day_count: 700, day },
+    { scope: 'o/one', model: 'nemotron-3.5-lightning-free', minute_count: 2, minute_at: NOW, day_count: 640, day },
+  ] });
+  assert.equal(await sharedDayCap({ ZEN_DB: two }, NOW), 2100, 'two providers = two allowances plus room for one more');
+  // yesterday's counters do not enlarge today's brake, and the shared row itself never counts
+  const stale = fakeD1({ budget: [
+    { scope: 'o/one', model: 'mimo-v2.6-flash-free', minute_count: 3, minute_at: NOW, day_count: 700, day },
+    { scope: '*', model: '*', minute_count: 9, minute_at: NOW, day_count: 700, day },
+    { scope: 'o/one', model: 'old-free', minute_count: 1, minute_at: NOW, day_count: 700, day: '2026-10-03' },
+  ] });
+  assert.equal(await sharedDayCap({ ZEN_DB: stale }, NOW), 1400);
+  assert.equal(await sharedDayCap({ ZEN_DB: fakeD1({}) }, NOW), 700, 'nothing counted yet = one allowance');
 });
 
 test('pickNextRepo: strict round-robin, disabled and skipped rows are left out', () => {
@@ -250,6 +276,30 @@ test('POST /zen/run: dispatches to the next repo in the ring, rotates, and count
   assert.equal(d1._meta.get('repo_cursor'), '0', 'cursor wrapped back after the last repo');
 });
 
+test('POST /zen/run: providers are budgeted apart — a spent provider does not refuse the next one', async () => {
+  const day = '2026-10-04';
+  const d1 = fakeD1({
+    repos: [{ repo: 'o/one', token_ref: 'env:GH_ONE', enabled: 1 }],
+    // MiMo (Xiaomi) has spent its whole day; the shared counter has seen every one of those calls.
+    budget: [
+      { scope: 'o/one', model: 'mimo-v2.6-flash-free', minute_count: 4, minute_at: NOW, day_count: 700, day },
+      { scope: '*', model: '*', minute_count: 4, minute_at: NOW, day_count: 700, day },
+    ],
+  });
+  const call = (model) => handle(new Request('https://l.test/zen/run', {
+    method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ model }),
+  }), env(d1, { GH_ONE: 'tok-1' }), { fetchImpl: fakeGh() });
+
+  const spent = await call('mimo-v2.6-flash-free');
+  assert.equal(spent.status, 429, 'the model that spent its day is still refused');
+  assert.equal((await spent.json()).reason, 'day');
+
+  const other = await call('nemotron-3.5-lightning-free');
+  assert.equal(other.status, 202, 'NVIDIA has its own quota and must not be refused by MiMo spending');
+  assert.equal(d1._budget.get('o/one|nemotron-3.5-lightning-free').day_count, 1);
+  assert.equal(d1._budget.get('*|*').day_count, 701, 'the shared brake keeps counting every call');
+});
+
 test('POST /zen/run: refusals are explicit — no model, quarantine, budget, GitHub error', async () => {
   const d1 = fakeD1({
     repos: [{ repo: 'o/one', token_ref: 'env:GH_ONE', enabled: 1 }],
@@ -306,7 +356,7 @@ test('POST /zen/report + GET /zen/models: the dead model goes quiet, the healthy
   assert.ok(by['fledge-free'].next_check_in <= LADDERS.flaky[0], 'the ~9%-alive model is re-checked within a minute');
   assert.equal(by['good-free'].status, 'ok');
   assert.equal(by['good-free'].next_check_in, 6 * 3_600_000);
-  assert.deepEqual(b.limits, { per_min: 50, per_day: 500 });
+  assert.deepEqual(b.limits, { per_min: 50, per_day: 700 });
 
   // and the dead model really is refused at the door
   const refused = await handle(new Request('https://l.test/zen/run', {
