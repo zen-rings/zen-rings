@@ -16,12 +16,14 @@
 // The policy is the same one `ring-hygiene` applies, imported rather than copied: finished runs older
 // than `keep-hours` go by age, and at most `max-runs` finished runs are kept per repository. The cap
 // is what makes this robust — however many runs accumulated while the pool was busy, one sweep
-// brings the tab back under the cap.
+// brings the tab back under the cap. Both defaults come from the policy module, so this sweep and the
+// ring sweep cannot disagree about how long a finished run is kept (27 minutes).
 //
-// Usage: node scripts/zen-pool-prune.mjs [--keep-hours 6] [--max-runs 20] [--dry-run]
+// Usage: node scripts/zen-pool-prune.mjs [--keep-hours 0.45] [--max-runs 20] [--dry-run]
+//        (defaults: 0.45 h = 27 minutes of retention, 20 newest finished runs kept)
 //        (needs GITHUB_REPOSITORY and GITHUB_TOKEN, both set by the workflow)
 
-import { planPrune, cutoffIso } from './zen-pool-policy.mjs';
+import { planPrune, cutoffIso, DEFAULT_KEEP_HOURS, DEFAULT_MAX_ITEMS } from './zen-pool-policy.mjs';
 
 const API = 'https://api.github.com';
 const GH_HEADERS = {
@@ -73,8 +75,8 @@ async function main() {
     console.error('zen-pool-prune: GITHUB_TOKEN is not set — the workflow must pass github.token.');
     process.exit(1);
   }
-  const keepHours = value('keep-hours', '6');
-  const maxRuns = value('max-runs', '20');
+  const keepHours = value('keep-hours', String(DEFAULT_KEEP_HOURS));
+  const maxRuns = value('max-runs', String(DEFAULT_MAX_ITEMS));
   const dryRun = flag('dry-run');
   const cutoff = cutoffIso(keepHours);
 

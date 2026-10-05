@@ -102,7 +102,7 @@ jobs:
         run: |
           set -uo pipefail
           echo "POOL sweep_start $(date -u +%FT%TZ)" >> pool.log
-          node scripts/zen-pool-prune.mjs --keep-hours 6 --max-runs 20
+          node scripts/zen-pool-prune.mjs --keep-hours 0.45 --max-runs 20
           echo "POOL sweep_done $(date -u +%FT%TZ)" >> pool.log
 
       - name: boot summary

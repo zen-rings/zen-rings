@@ -10,6 +10,18 @@
 // are kept. The cap is what makes a sweep robust to a late trigger — GitHub delays `schedule` in this
 // ring by hours (measured), so an age window alone cannot bound an Actions tab.
 
+// The retention window, in hours: 27 minutes. A pool worker lives at most 30 minutes
+// (`timeout-minutes: 30` in zen-pool.yml, measured 30.3 min), so once its run is finished the run is
+// already history — 27 minutes is enough to see "this worker worked" in the Actions tab and stop there.
+// The owner picked the odd number on purpose: a cutoff that is not a round hour never lands on an hour
+// boundary, so a burst of workers finishing together does not all survive (or all vanish) at once.
+// 27 min = 0.45 h. The window is expressed in hours because that is what the entry points take.
+export const DEFAULT_KEEP_HOURS = 0.45;
+
+// Same window for the newest-items cap. Kept next to the window so the two cannot drift: with a 27
+// minute window a busy ring still needs the cap, because GitHub may deliver the cron hours late.
+export const DEFAULT_MAX_ITEMS = 20;
+
 // A finished item is the only thing either sweep is ever allowed to delete. A pool worker IS an Actions
 // run, so anything that is not `completed` is a worker that is still serving requests — or a job that
 // GitHub has queued and will start in a minute.
@@ -34,7 +46,7 @@ export function isPrunable(item, cutoffMs, nowMs) {
 
 export function cutoffIso(keepHours, nowMs = Date.now()) {
   const hours = Number(keepHours);
-  const safe = Number.isFinite(hours) && hours > 0 ? hours : 6;
+  const safe = Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_KEEP_HOURS;
   return new Date(nowMs - safe * 3600 * 1000).toISOString();
 }
 
