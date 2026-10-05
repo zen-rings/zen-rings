@@ -131,13 +131,19 @@ jobs:
             repo=$(jq -r '.repo' <<<"$row")
             pat=$(jq -r '.token // .resolved_token // empty' <<<"$row")
             if [ -z "$pat" ]; then echo "provision $repo skipped — the registry has no token for this row"; continue; fi
-            for f in .github/workflows/zen-pool.yml scripts/zen-pool-worker.mjs scripts/zen-client.mjs; do
+            for f in .github/workflows/zen-pool.yml scripts/zen-pool-worker.mjs scripts/zen-client.mjs scripts/zen-pool-prune.mjs; do
               # The ladder repo is the source of truth for the worker code — pull from there, not
-              # from this repo, so a worker change lands in the ring on the next sync. And always
-              # overwrite: the old "skip if present" left stale workers serving empty prompts.
+              # from this repo, so a worker change lands in the ring on the next sync. The sweep
+              # script is the exception: it is ring policy, and the ladder repo is pull-only for the
+              # ring owner, so it is pulled from this repository instead. And always overwrite: the
+              # old "skip if present" left stale workers serving empty prompts.
               # The contents API needs the existing file's sha to overwrite it — without it the PUT
               # answers 422 and the ring keeps the stale worker.
-              content=$(curl -sS "https://raw.githubusercontent.com/trained-assist/trained-assist-llm-ladder/main/$f" | base64 -w0)
+              case "$f" in
+                scripts/zen-pool-prune.mjs) src="https://raw.githubusercontent.com/zen-rings/zen-rings/main/$f" ;;
+                *) src="https://raw.githubusercontent.com/trained-assist/trained-assist-llm-ladder/main/$f" ;;
+              esac
+              content=$(curl -sS "$src" | base64 -w0)
               sha=$(curl -sS -H "authorization: Bearer $pat" "https://api.github.com/repos/$repo/contents/$f" | jq -r '.sha // empty')
               jq -n --arg msg "zen-pool: sync $f" --arg content "$content" --arg sha "$sha" \
                 '{message:$msg, content:$content, branch:"main"} + (if $sha != "" then {sha:$sha} else {} end)' > /tmp/req.json
