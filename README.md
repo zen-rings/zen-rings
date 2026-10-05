@@ -99,7 +99,21 @@ Budgets are per model: 50 calls/min, 500/day, registry of 9 repos. `/zen/health`
 
 **The ring lives in this worker's D1**, in `zen_repos` — not in a GitHub secret, not in a
 spreadsheet. `zen-ring-sync.yml` reads that table (`source: cf`), and `scripts/zen-ring.mjs` is the
-owner's interface to it (`list`, `add`, `disable`). Provisioning needs each repo's token, so the
+owner's interface to it (`list`, `add`, `disable`).
+
+**Adding a repository, no agent needed.** Put the new rows in one repository secret named
+`ZEN_RING_IMPORT` — a JSON array, one object per repo:
+
+```json
+[
+  { "repo": "my-org/my-repo", "token": "ghp_…", "location": "" },
+  { "repo": "my-org/another", "token": "ghp_…" }
+]
+```
+
+then run `zen-ring-sync` with `source: gh-import`, `provision: true`, `mode: register`. The workflow
+masks every token, writes the rows into the registry encrypted, and provisions the new repositories
+(worker files, `ZEN_RUNNER_URL`, `ZEN_RUNNER_TOKEN`). `location` is an optional region hint. Provisioning needs each repo's token, so the
 worker decrypts on request behind `ZEN_RING_ADMIN_TOKEN`; that token is never provisioned into a ring
 repo, and the low-privilege `ZEN_RUNNER_TOKEN` that every member *does* hold opens neither the
 registry nor the payload.

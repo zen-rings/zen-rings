@@ -6,6 +6,11 @@ name: zen-ring-sync
 # writes nothing secret of its own — there is no ring payload in GitHub secrets and no spreadsheet
 # behind it. The worker and the provisioner read the same row, so they cannot drift apart.
 #
+# Adding a repository is the owner's job and needs no agent: put the new rows in ONE repository
+# secret named ZEN_RING_IMPORT (a JSON array, see the shape below) and run this workflow with
+# `source: gh-import`. The workflow reads the secret, masks every token, writes the rows into the
+# worker registry (encrypted) and provisions the new repositories. Nothing is printed.
+#
 # Two tokens, deliberately not one:
 #   ZEN_RUNNER_TOKEN      the low-privilege one, provisioned into every ring repo (call models, report);
 #   ZEN_RING_ADMIN_TOKEN  never leaves this repo + the owner's terminal; reads the registry and the
@@ -35,9 +40,9 @@ on:
         options: [register, disable, list]
         default: register
       source:
-        description: 'cf = read the ring from the worker registry (default); gh-secret = the legacy payload secret'
+        description: 'cf = read the ring from the worker registry (default); gh-import = the owner''s ZEN_RING_IMPORT secret; gh-secret = the legacy payload secret'
         type: choice
-        options: [cf, gh-secret]
+        options: [cf, gh-import, gh-secret]
         default: cf
       import:
         description: 'before anything else: upsert the source rows into the worker registry (one-off migration)'
@@ -64,6 +69,7 @@ jobs:
           SOURCE: ${{ inputs.source }}
           RING_ADMIN: ${{ secrets.ZEN_RING_ADMIN_TOKEN }}
           RING_PAYLOAD: ${{ secrets.ZEN_RING_PAYLOAD }}
+          RING_IMPORT: ${{ secrets.ZEN_RING_IMPORT }}
         run: |
           set -euo pipefail
           umask 077
@@ -73,10 +79,14 @@ jobs:
               -H "authorization: Bearer $RING_ADMIN" -H 'accept: application/json' "$BASE/zen/ring/payload")
             if [ "$code" != "200" ]; then
               echo "::error::the ring registry did not answer ($code): $(jq -r '.error // "no detail"' .ring/payload.json 2>/dev/null || echo unreadable)"
-              echo "::error::the ring lives in the worker's D1 now — fix ZEN_RING_ADMIN_TOKEN in this repo, or run with source=gh-secret once to import."
+              echo "::error::the ring lives in the worker's D1 now — fix ZEN_RING_ADMIN_TOKEN in this repo, or run with source=gh-import and a ZEN_RING_IMPORT secret."
               exit 1
             fi
             jq -c '.repos' .ring/payload.json > .ring/ring.json
+          elif [ "$SOURCE" = "gh-import" ]; then
+            # The owner's self-service entrance: one secret, a JSON array of rows. The secret is
+            # deleted from the job as soon as it is read — it never reaches a log or an input.
+            printf '%s' "$RING_IMPORT" > .ring/ring.json
           else
             printf '%s' "$RING_PAYLOAD" > .ring/ring.json
           fi
