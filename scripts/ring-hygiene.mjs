@@ -93,6 +93,48 @@ function capOf(value) {
 // The prune decision, as a pure function: finished items older than the cutoff go by age, the finished
 // items beyond the newest `max` go by cap, and everything not finished is left alone. Newest-first is
 // what the REST list already returns, but sorting here keeps the decision independent of that.
+// The worker workflow is provisioned from the ladder repo, which the ring owner cannot write to
+// (pull only), so the ring-only sweep step cannot live there. It is injected after provisioning,
+// exactly like the readable name: idempotent, and a no-op once the step is present. Two edits —
+// `actions: write` in permissions (without it github.token cannot delete a run) and the step itself,
+// placed after `serve` so a worker never prunes under itself.
+const SWEEP_STEP = [
+  '      # Sweep this repository\'s own finished runs. Runs after `serve` so a worker that is still',
+  '      # holding calls never prunes under itself, and `if: always()` so a worker that exits on the',
+  '      # idle TTL still leaves a clean tab behind. Live runs (this worker, a sibling) are never',
+  '      # touched: the policy only ever deletes `completed` ones.',
+  '      - name: sweep own finished runs',
+  '        if: always()',
+  '        env:',
+  '          GITHUB_TOKEN: ${{ github.token }}',
+  '          GITHUB_REPOSITORY: ${{ github.repository }}',
+  '        run: |',
+  '          set -uo pipefail',
+  '          echo "POOL sweep_start $(date -u +%FT%TZ)" >> pool.log',
+  '          node scripts/zen-pool-prune.mjs --keep-hours 6 --max-runs 20',
+  '          echo "POOL sweep_done $(date -u +%FT%TZ)" >> pool.log',
+].join('\n');
+
+export function ensureWorkerSweep(content) {
+  if (typeof content !== 'string' || !content.trim()) return { ok: false, reason: 'empty file' };
+  if (content.includes('sweep own finished runs')) return { ok: false, reason: 'already swept' };
+  const lines = content.split('\n');
+  const at = lines.findIndex((l) => /^\s*- name: boot summary\s*$/.test(l));
+  if (at === -1) return { ok: false, reason: 'no boot summary step to insert before' };
+  let out = lines;
+  const perm = out.findIndex((l) => /^permissions:\s*$/.test(l));
+  if (perm !== -1) {
+    const read = out.findIndex((l, i) => i > perm && /^  contents: read\s*$/.test(l));
+    const hasWrite = out.some((l) => /^  actions: write\s*$/.test(l));
+    if (read !== -1 && !hasWrite) {
+      out = [...out.slice(0, read + 1), '  actions: write', ...out.slice(read + 1)];
+    }
+  }
+  const stepAt = out.findIndex((l) => /^\s*- name: boot summary\s*$/.test(l));
+  out = [...out.slice(0, stepAt), SWEEP_STEP, '', ...out.slice(stepAt)];
+  return { ok: true, content: out.join('\n') };
+}
+
 export function planPrune(items, { cutoffMs, max = Infinity, nowMs = Date.now() } = {}) {
   const list = Array.isArray(items) ? items.filter((it) => it && typeof it.id === 'number') : [];
   const cap = capOf(max);
@@ -215,6 +257,29 @@ async function harden(token, repo, dryRun) {
   return { changed: true, applied: ok, error: ok ? undefined : `put enabled=${a.ok} workflow=${b.ok}` };
 }
 
+// Inject the ring-only sweep step into the provisioned worker workflow. Reads the file, applies
+// ensureWorkerSweep and writes it back — the same read/rewrite shape as renameWorkflow above.
+async function ensureSweep(token, repo, dryRun) {
+  const cur = await gh(token, 'GET', `/repos/${repo}/contents/${WORKER_WORKFLOW}`);
+  if (!cur.ok) return { changed: false, error: `read ${WORKER_WORKFLOW} http=${cur.status}` };
+  const content = Buffer.from(cur.json.content || '', 'base64').toString('utf8');
+  const next = ensureWorkerSweep(content);
+  if (!next.ok) return { changed: false, reason: next.reason };
+  if (dryRun) return { changed: true, applied: false };
+  const put = await gh(
+    token,
+    'PUT',
+    `/repos/${repo}/contents/${WORKER_WORKFLOW}`,
+    {
+      message: 'zen-pool: sweep own finished runs on exit',
+      content: Buffer.from(next.content, 'utf8').toString('base64'),
+      sha: cur.json.sha,
+      branch: cur.json.default_branch || 'main',
+    },
+  );
+  return { changed: true, applied: put.ok, error: put.ok ? undefined : `put http=${put.status}` };
+}
+
 async function renameWorkflow(token, repo, friendlyName, dryRun) {
   const cur = await gh(token, 'GET', `/repos/${repo}/contents/${WORKER_WORKFLOW}`);
   if (!cur.ok) return { changed: false, error: `read ${WORKER_WORKFLOW} http=${cur.status}` };
@@ -259,6 +324,7 @@ async function main() {
   const doArtifacts = flag('prune-artifacts');
   const doHarden = flag('harden');
   const doRename = flag('rename-workflows');
+  const doSweep = flag('ensure-sweep');
   const selfRepo = value('self', '');
   const selfToken = process.env.ZEN_HYGIENE_SELF_TOKEN || '';
   const selfAdded = selfRepo && selfToken ? withSelfRow(rows, { repo: selfRepo, token: selfToken }) : rows;
@@ -296,6 +362,7 @@ async function main() {
     // so the self row prunes and nothing else.
     if (doHarden && !row.self) entry.harden = await harden(token, repo, dryRun);
     if (doRename && !row.self) entry.rename = await renameWorkflow(token, repo, friendly, dryRun);
+    if (doSweep && !row.self) entry.sweep = await ensureSweep(token, repo, dryRun);
     report.push(entry);
   }
   console.log(JSON.stringify({ hygiene: report }, null, 2));
