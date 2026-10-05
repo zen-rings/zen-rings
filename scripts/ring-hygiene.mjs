@@ -12,8 +12,8 @@
 // keeps. `add-mask` is applied by the caller before this runs.
 //
 // Modes (all optional, all default to a no-op):
-//   prune_runs        delete finished runs older than keep_hours
-//   prune_artifacts   delete artifacts older than keep_hours
+//   prune_runs        delete finished runs older than keep_hours, and finished runs beyond max_runs
+//   prune_artifacts   delete artifacts older than keep_hours, and artifacts beyond max_artifacts
 //   harden            make sure Actions are enabled and the default workflow token is read-only
 //   rename_workflows  give the pool workflow a human-readable display name (the `name:` line only,
 //                     nothing that can change how the worker behaves)
@@ -25,9 +25,16 @@
 // target, and it only ever prunes runs/artifacts here: harden and rename are ring-wide settings and
 // stay on registry rows, which are the rows that justify them.
 //
-// Usage: node scripts/ring-hygiene.mjs [--ring .ring/ring.json] [--keep-hours 24] [--repos a/b,c/d]
+// Usage: node scripts/ring-hygiene.mjs [--ring .ring/ring.json] [--keep-hours 6] [--repos a/b,c/d]
 //        [--prune-runs] [--prune-artifacts] [--harden] [--rename-workflows] [--self owner/name]
+//        [--max-runs 20] [--max-artifacts 20]
 //        [--friendly-name "Zen Pool — inference worker"] [--dry-run]
+//
+// Why there are two rules and not one: GitHub delays `schedule` in this ring by hours (measured: the
+// `*/2` pool scaler last ran 5h late), and a 24h age window means the Actions tab is full even when
+// the trigger works. So the age window is short (6h by default) and, on top of it, every repository is
+// capped at `max_runs` newest finished runs. The cap is what makes the sweep survive a late — or
+// missing — trigger: however late it fires, the tab cannot grow without bound.
 
 import { readFileSync } from 'node:fs';
 
@@ -64,8 +71,45 @@ export function isPrunable(item, cutoffMs, nowMs) {
 
 export function cutoffIso(keepHours, nowMs = Date.now()) {
   const hours = Number(keepHours);
-  const safe = Number.isFinite(hours) && hours > 0 ? hours : 24;
+  const safe = Number.isFinite(hours) && hours > 0 ? hours : 6;
   return new Date(nowMs - safe * 3600 * 1000).toISOString();
+}
+
+// A finished item is the only thing this script is ever allowed to delete. A pool worker IS an Actions
+// run, so anything that is not `completed` is a worker that is still serving requests — or a job that
+// GitHub has queued and will start in a minute.
+export function isFinished(item) {
+  if (!item || typeof item.created_at !== 'string') return false;
+  const created = Date.parse(item.created_at);
+  if (!Number.isFinite(created)) return false;
+  return !item.status || item.status === 'completed';
+}
+
+function capOf(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : Infinity;
+}
+
+// The prune decision, as a pure function: finished items older than the cutoff go by age, the finished
+// items beyond the newest `max` go by cap, and everything not finished is left alone. Newest-first is
+// what the REST list already returns, but sorting here keeps the decision independent of that.
+export function planPrune(items, { cutoffMs, max = Infinity, nowMs = Date.now() } = {}) {
+  const list = Array.isArray(items) ? items.filter((it) => it && typeof it.id === 'number') : [];
+  const cap = capOf(max);
+  const finished = list
+    .filter((it) => isFinished(it) && Date.parse(it.created_at) <= nowMs)
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  const byAge = finished.filter((it) => isPrunable(it, cutoffMs, nowMs));
+  const fresh = finished.filter((it) => !isPrunable(it, cutoffMs, nowMs));
+  const kept = cap === Infinity ? fresh : fresh.slice(0, cap);
+  const byCap = cap === Infinity ? [] : fresh.slice(cap);
+  return {
+    ids: [...byAge, ...byCap].map((it) => it.id),
+    by_age: byAge.length,
+    by_cap: byCap.length,
+    kept: kept.length,
+    live: list.length - finished.length,
+  };
 }
 
 export function pickRepos(rows, filter) {
@@ -106,45 +150,52 @@ async function gh(token, method, path, body) {
   return { status: res.status, ok: res.ok, json, text: text.slice(0, 300) };
 }
 
-async function listRuns(token, repo, cutoff, page = 1) {
-  const q = `per_page=100&page=${page}&created=<${encodeURIComponent(cutoff)}`;
-  const r = await gh(token, 'GET', `/repos/${repo}/actions/runs?${q}`);
+// No `created=` filter here: the age rule is decided in planPrune, and the cap rule ("keep the newest
+// N finished runs") needs to see the runs that are newer than the cutoff as well.
+async function listRuns(token, repo, page = 1) {
+  const r = await gh(token, 'GET', `/repos/${repo}/actions/runs?per_page=100&page=${page}`);
   if (!r.ok) return { error: `runs http=${r.status}`, runs: [] };
   return { runs: r.json?.workflow_runs || [] };
 }
 
-async function pruneRuns(token, repo, cutoff, dryRun) {
-  const seen = [];
-  for (let page = 1; page <= 5; page += 1) {
-    const { runs, error } = await listRuns(token, repo, cutoff, page);
-    if (error) return { deleted: seen.length, error };
-    if (!runs.length) break;
-    for (const run of runs) {
-      if (!isPrunable(run, Date.parse(cutoff))) continue;
-      seen.push(run.id);
-      if (dryRun) continue;
-      const d = await gh(token, 'DELETE', `/repos/${repo}/actions/runs/${run.id}`);
-      if (!d.ok && d.status !== 204 && d.status !== 404) return { deleted: seen.length - 1, error: `delete run ${run.id} http=${d.status}` };
-    }
-    if (runs.length < 100) break;
-  }
-  return { deleted: seen.length };
+async function listArtifacts(token, repo) {
+  const r = await gh(token, 'GET', `/repos/${repo}/actions/artifacts?per_page=100`);
+  if (!r.ok) return { error: `artifacts http=${r.status}`, artifacts: [] };
+  return { artifacts: r.json?.artifacts || [] };
 }
 
-async function pruneArtifacts(token, repo, cutoff, dryRun) {
-  const r = await gh(token, 'GET', `/repos/${repo}/actions/artifacts?per_page=100&created=<${encodeURIComponent(cutoff)}`);
-  if (!r.ok) return { deleted: 0, error: `artifacts http=${r.status}` };
-  const arts = (r.json?.artifacts || []).filter((a) => isPrunable(a, Date.parse(cutoff)));
+async function applyPlan(token, repo, plan, kind, dryRun) {
   let deleted = 0;
-  for (const a of arts) {
+  for (const id of plan.ids) {
     if (dryRun) {
       deleted += 1;
       continue;
     }
-    const d = await gh(token, 'DELETE', `/repos/${repo}/actions/artifacts/${a.id}`);
-    if (d.ok || d.status === 404) deleted += 1;
+    const path = kind === 'runs' ? `/repos/${repo}/actions/runs/${id}` : `/repos/${repo}/actions/artifacts/${id}`;
+    const d = await gh(token, 'DELETE', path);
+    if (d.ok || d.status === 204 || d.status === 404) deleted += 1;
+    else return { ...plan, deleted, error: `delete ${kind} ${id} http=${d.status}` };
   }
-  return { deleted };
+  return { ...plan, deleted };
+}
+
+async function pruneRuns(token, repo, cutoff, dryRun, maxRuns) {
+  const all = [];
+  for (let page = 1; page <= 5; page += 1) {
+    const { runs, error } = await listRuns(token, repo, page);
+    if (error) return { deleted: 0, error };
+    all.push(...runs);
+    if (runs.length < 100) break;
+  }
+  const plan = planPrune(all, { cutoffMs: Date.parse(cutoff), max: maxRuns });
+  return applyPlan(token, repo, plan, 'runs', dryRun);
+}
+
+async function pruneArtifacts(token, repo, cutoff, dryRun, maxArtifacts) {
+  const { artifacts, error } = await listArtifacts(token, repo);
+  if (error) return { deleted: 0, error };
+  const plan = planPrune(artifacts, { cutoffMs: Date.parse(cutoff), max: maxArtifacts });
+  return applyPlan(token, repo, plan, 'artifacts', dryRun);
 }
 
 async function harden(token, repo, dryRun) {
@@ -198,7 +249,9 @@ function value(name, fallback) {
 async function main() {
   const ringPath = value('ring', '.ring/ring.json');
   const rows = JSON.parse(readFileSync(ringPath, 'utf8'));
-  const keepHours = value('keep-hours', '24');
+  const keepHours = value('keep-hours', '6');
+  const maxRuns = value('max-runs', '20');
+  const maxArtifacts = value('max-artifacts', '20');
   const cutoff = cutoffIso(keepHours);
   const friendly = value('friendly-name', 'Zen Pool — inference worker');
   const dryRun = flag('dry-run');
@@ -217,6 +270,8 @@ async function main() {
       self: selfRepo && selfToken ? selfRepo : 'off',
       cutoff,
       keep_hours: keepHours,
+      max_runs: maxRuns,
+      max_artifacts: maxArtifacts,
       dry_run: dryRun,
     }),
   );
@@ -235,8 +290,8 @@ async function main() {
       report.push(entry);
       continue;
     }
-    if (doRuns) entry.runs = await pruneRuns(token, repo, cutoff, dryRun);
-    if (doArtifacts) entry.artifacts = await pruneArtifacts(token, repo, cutoff, dryRun);
+    if (doRuns) entry.runs = await pruneRuns(token, repo, cutoff, dryRun, maxRuns);
+    if (doArtifacts) entry.artifacts = await pruneArtifacts(token, repo, cutoff, dryRun, maxArtifacts);
     // harden and rename change how workflows of a repository run; only a registry row justifies that,
     // so the self row prunes and nothing else.
     if (doHarden && !row.self) entry.harden = await harden(token, repo, dryRun);
