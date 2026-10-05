@@ -155,6 +155,16 @@ jobs:
           done
           rm -f /tmp/runner-token
 
+      - name: readable workflow names
+        if: ${{ inputs.provision }}
+        env:
+          FRIENDLY_WORKER_NAME: 'Zen Pool — inference worker'
+        run: |
+          # The source file still says `name: zen-pool`, so a provision would put the bare name back.
+          # This rewrites only that one top-level line, right after the file is written.
+          node scripts/ring-hygiene.mjs --ring .ring/ring.json --rename-workflows \
+            --friendly-name "${FRIENDLY_WORKER_NAME}" || true
+
       - name: register ring rows
         if: ${{ inputs.mode != 'list' }}
         env:
