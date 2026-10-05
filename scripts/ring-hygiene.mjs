@@ -40,8 +40,9 @@ export function rewriteWorkflowName(content, friendlyName) {
   const at = lines.findIndex((l) => /^name:\s*\S/.test(l));
   if (at === -1) return { ok: false, reason: 'no top-level name: line' };
   if (lines[at].replace(/^name:\s*/, '').trim() === name) return { ok: false, reason: 'already named' };
+  const from = lines[at];
   lines[at] = `name: ${name}`;
-  return { ok: true, content: lines.join('\n'), from: lines[at] };
+  return { ok: true, content: lines.join('\n'), from };
 }
 
 export function isPrunable(item, cutoffMs, nowMs) {

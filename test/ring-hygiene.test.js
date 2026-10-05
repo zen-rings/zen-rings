@@ -66,3 +66,9 @@ test('pickRepos keeps enabled rows, drops malformed ones and honours a filter', 
   assert.deepEqual(pickRepos(rows, 'vovalikessmoothy-png/gha-worker-01').map((r) => r.repo), ['vovalikessmoothy-png/gha-worker-01']);
   assert.deepEqual(pickRepos(rows, 'a/b, c/d '), []);
 });
+
+test('rewriteWorkflowName reports the OLD name in from', () => {
+  const r = rewriteWorkflowName(WF, 'Zen Pool — inference worker');
+  assert.equal(r.from, 'name: zen-pool');
+  assert.equal(r.content.split('\n')[0], 'name: Zen Pool — inference worker');
+});
