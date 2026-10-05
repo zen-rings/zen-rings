@@ -1,0 +1,115 @@
+name: ring-hygiene
+# Housekeeping for the repositories in the pool ring.
+#
+# What it is for: a pool worker is a GitHub Actions run, so a busy ring leaves dozens of identical
+# `zen-pool` runs in each member repository. This workflow walks the ring registry (the same
+# `GET /zen/ring/payload` the provisioner uses), borrows each repository's own token for the duration
+# of the run, and deletes finished runs and artifacts older than `keep_hours`. It also makes sure
+# Actions are enabled with a read-only default token, and can give the pool workflow a readable
+# display name.
+#
+# What it never does: it does not touch the contents of a ring repository beyond the single `name:`
+# line of the pool workflow, and it never prints, stores or forwards a token. Tokens come from the
+# registry at runtime and are `add-mask`ed before the script starts, exactly like zen-ring-sync.
+#
+# This repository is public: inputs and logs are readable by anyone — which is why no token is ever an
+# input.
+
+on:
+  schedule:
+    # GitHub delays `schedule` in these repositories by minutes to hours; pruning is not time-critical,
+    # so an hourly tick is enough and a late one changes nothing.
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      keep_hours:
+        description: 'keep finished runs/artifacts newer than this many hours'
+        default: '24'
+      prune_runs:
+        description: 'delete finished workflow runs older than keep_hours'
+        type: boolean
+        default: true
+      prune_artifacts:
+        description: 'delete artifacts older than keep_hours'
+        type: boolean
+        default: true
+      harden:
+        description: 'ensure Actions are enabled and the default workflow token is read-only'
+        type: boolean
+        default: true
+      rename_workflows:
+        description: 'set a human-readable display name on the pool workflow (name: line only)'
+        type: boolean
+        default: false
+      friendly_name:
+        description: 'display name used when rename_workflows is on'
+        default: 'Zen Pool — inference worker'
+      repos:
+        description: 'comma-separated owner/name filter (empty = every enabled ring row)'
+        default: ''
+      dry_run:
+        description: 'report what would be deleted/changed without deleting or changing anything'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ring-hygiene
+  cancel-in-progress: false
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: read ring rows
+        env:
+          BASE: ${{ vars.ZEN_RUNNER_URL }}
+          RING_ADMIN: ${{ secrets.ZEN_RING_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p .ring
+          code=$(curl -sS -o .ring/payload.json -w '%{http_code}' \
+            -H "authorization: Bearer $RING_ADMIN" -H 'accept: application/json' "$BASE/zen/ring/payload")
+          if [ "$code" != "200" ]; then
+            echo "::error::the ring registry did not answer ($code) — fix ZEN_RING_ADMIN_TOKEN in this repo."
+            exit 1
+          fi
+          jq -c '.repos' .ring/payload.json > .ring/ring.json
+          node -e 'const a=JSON.parse(require("fs").readFileSync(".ring/ring.json","utf8")); if(!Array.isArray(a)||!a.length) throw new Error("ring rows are not a non-empty JSON array"); console.log("RING_ROWS="+a.length)'
+          # A token fetched at runtime is not masked by GitHub on its own — mask it before anything runs.
+          jq -r '.[] | (.token // empty), (.resolved_token // empty)' .ring/ring.json | while IFS= read -r t; do
+            if [ -n "$t" ]; then echo "::add-mask::$t"; fi
+          done
+
+      - name: run hygiene
+        env:
+          ARGS: >-
+            ${{ inputs.prune_runs && '--prune-runs' || '' }}
+            ${{ inputs.prune_artifacts && '--prune-artifacts' || '' }}
+            ${{ inputs.harden && '--harden' || '' }}
+            ${{ inputs.rename_workflows && '--rename-workflows' || '' }}
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+          KEEP_HOURS: ${{ inputs.keep_hours }}
+          FRIENDLY: ${{ inputs.friendly_name }}
+          REPOS: ${{ inputs.repos }}
+        run: |
+          set -euo pipefail
+          # On schedule there are no inputs: default to the full sweep with a 24h window.
+          if [ -z "${ARGS// }" ]; then ARGS='--prune-runs --prune-artifacts --harden'; fi
+          node scripts/ring-hygiene.mjs --ring .ring/ring.json --keep-hours "${KEEP_HOURS:-24}" \
+            --friendly-name "${FRIENDLY:-Zen Pool — inference worker}" --repos "${REPOS:-}" $ARGS
+          rm -f .ring/ring.json .ring/payload.json
+
+      - name: ring state
+        if: always()
+        env:
+          BASE: ${{ vars.ZEN_RUNNER_URL }}
+        run: |
+          echo "--- zen/health ---"; curl -sS "$BASE/zen/health"; echo
+          echo "--- zen/pool/health ---"; curl -sS "$BASE/zen/pool/health"; echo
