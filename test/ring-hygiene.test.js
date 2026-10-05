@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {
   rewriteWorkflowName,
@@ -254,4 +255,30 @@ test('a sweep step provisioned with the old window is refreshed, not left as a n
   assert.ok(!refreshed.content.includes('--keep-hours 6'));
   assert.equal(refreshed.content.split('sweep own finished runs').length, 2);
   assert.equal(ensureWorkerSweep(refreshed.content).reason, 'already swept');
+});
+
+// A backslash-escaped quote inside a single-quoted YAML scalar is not an escape — YAML ends the string
+// there and the file stops parsing. GitHub does not report that as an error: it drops the workflow's
+// triggers and falls back to `push`, so the only symptom is "workflow does not have workflow_dispatch"
+// and a red run on every push. Cheaper to catch it here than to notice it in production.
+test('no workflow file escapes a quote inside a single-quoted YAML scalar', () => {
+  const files = fs.readdirSync('.github/workflows').filter((f) => f.endsWith('.yml'));
+  const escapedQuote = String.raw`\'`;
+  const offenders = [];
+  for (const f of files) {
+    fs.readFileSync(`.github/workflows/${f}`, 'utf8')
+      .split('\n')
+      .forEach((line, i) => {
+        if (line.includes(escapedQuote)) offenders.push(`${f}:${i + 1} ${line.trim()}`);
+      });
+  }
+  assert.deepEqual(offenders, []);
+});
+
+test('the housekeeping workflow keeps both triggers it is dispatched and scheduled by', () => {
+  const wf = fs.readFileSync('.github/workflows/ring-hygiene.yml', 'utf8');
+  const on = wf.slice(wf.indexOf('\non:'), wf.indexOf('\npermissions:'));
+  assert.ok(on.includes('workflow_dispatch:'));
+  assert.ok(on.includes('cron:'));
+  assert.ok(on.includes("default: '0.45'"), 'the dispatch default window is 27 minutes');
 });

@@ -76,7 +76,7 @@ on:
         type: boolean
         default: true
       ensure_sweep:
-        description: 'make sure every ring repository\'s worker workflow carries the current sweep window'
+        description: "make sure every ring repository's worker workflow carries the current sweep window"
         type: boolean
         default: true
       dry_run:
