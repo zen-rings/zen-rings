@@ -129,15 +129,20 @@ async function pruneArtifacts(token, repo, cutoff, dryRun) {
 }
 
 async function harden(token, repo, dryRun) {
+  // `default_workflow_permissions` does not appear in GET /actions/permissions (that one answers
+  // {enabled, allowed_actions}); it lives on /actions/permissions/workflow. Read it from there, or
+  // the check would report "changed" on every single run.
   const cur = await gh(token, 'GET', `/repos/${repo}/actions/permissions`);
   if (!cur.ok) return { changed: false, error: `permissions http=${cur.status}` };
-  const want = { enabled: true, default_workflow_permissions: 'read' };
-  if (cur.json?.enabled === true && cur.json?.default_workflow_permissions === 'read') {
-    return { changed: false, ok: true };
-  }
-  if (dryRun) return { changed: true, applied: false };
-  const put = await gh(token, 'PUT', `/repos/${repo}/actions/permissions`, want);
-  return { changed: true, applied: put.ok, error: put.ok ? undefined : `put http=${put.status}` };
+  const wf = await gh(token, 'GET', `/repos/${repo}/actions/permissions/workflow`);
+  const enabled = cur.json?.enabled === true;
+  const readOnly = wf.ok && wf.json?.default_workflow_permissions === 'read';
+  if (enabled && readOnly) return { changed: false, ok: true };
+  if (dryRun) return { changed: true, applied: false, enabled, read_only: readOnly };
+  const a = enabled ? { ok: true } : await gh(token, 'PUT', `/repos/${repo}/actions/permissions`, { enabled: true });
+  const b = readOnly ? { ok: true } : await gh(token, 'PUT', `/repos/${repo}/actions/permissions/workflow`, { default_workflow_permissions: 'read' });
+  const ok = a.ok && b.ok;
+  return { changed: true, applied: ok, error: ok ? undefined : `put enabled=${a.ok} workflow=${b.ok}` };
 }
 
 async function renameWorkflow(token, repo, friendlyName, dryRun) {
