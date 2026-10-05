@@ -77,7 +77,7 @@ jobs:
           ZEN_RUNNER_URL: ${{ vars.ZEN_RUNNER_URL }}
           ZEN_RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
           ZEN_POOL_REPO: ${{ github.repository }}
-          ZEN_DAILY_BUDGET: ${{ vars.ZEN_DAILY_BUDGET || '500' }}
+          ZEN_DAILY_BUDGET: ${{ vars.ZEN_DAILY_BUDGET || '700' }}
         run: |
           set -uo pipefail
           # The pool dispatches idle_exit_ms (its TTL); a human dispatch sends idle_exit. Accept both.

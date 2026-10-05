@@ -54,7 +54,8 @@ if (!args.model) {
 
 const client = createZenClient({
   ratePerMin: 50,
-  dailyBudget: Number(process.env.ZEN_DAILY_BUDGET || 500),
+  // Per MODEL, per process (see zen-pool-worker.mjs) — the same 700 as the controller.
+  dailyBudget: Number(process.env.ZEN_DAILY_BUDGET || 700),
   rateWaitMaxMs: 0,
   timeoutMs: Number(process.env.ZEN_TIMEOUT_MS || 90_000),
 });

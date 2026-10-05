@@ -183,6 +183,25 @@ a *different* `user-agent` too. Two parallel GH runners each got their own budge
 so tripping one model does not silence another. The IP is the identity the provider meters
 against; the budget itself is per model (provider). Track state per model, not globally.
 
+### Our own budget numbers (what the code enforces)
+
+Two layers, both **per model**, because the quota above is per model:
+
+| Layer | Where | Rate | Day |
+|---|---|---|---|
+| Controller | `src/zen-runner.js` `LIMITS`, row `zen_budget(repo, model)` | 50/min per (repo, model) | **700/day per (repo, model)** |
+| Worker | `scripts/zen-client.mjs` `dailyBudget` (`ZEN_DAILY_BUDGET`) | 50/min per model, in-process | **700/day per model**, counters in memory, reset with the run |
+
+700 sits under both measured ceilings — ~940/day for zen free per (IP, model) and 1000/day for
+OpenRouter `:free` per account — and it is deliberately NOT 1000: the counters must trip before the
+provider does, so a mistake shows up as our own 429 with a `retry_after`, not as a provider storm.
+
+The shared `('*','*')` row is a runaway brake, not an allowance: its day cap is
+`perDay × (per-model counters that moved today + 1)`, so it can never be tighter than the sum of
+the independent per-provider quotas, and a provider that has not called yet is never refused by
+another's spending (issue #24). Its **minute** cap stays shared on purpose — an account-wide rate
+limit is real (OpenRouter `:free` = 20/min per account).
+
 ### What this means for the ladder
 
 - **CF Worker egress is unusable for zen** — 429 from request #1 on every colo. The

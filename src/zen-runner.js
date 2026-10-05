@@ -3,7 +3,7 @@
 // One job, four jobs at once:
 //   1. decide whether a model may be called AT ALL right now (quarantine with an exponential
 //      ladder, so a dead provider is not poked 100 times per run);
-//   2. hold the budget (50/min and 500/day per runner repo — the real quota is per (egress IP,
+//   2. hold the budget (50/min and 700/day per runner repo — the real quota is per (egress IP,
 //      model), and a repository IS an egress IP);
 //   3. dispatch the GitHub Actions run round-robin across the registry, each with its own token;
 //   4. tell the caller exactly why something was refused (202/401/409/413/429/502/503).
@@ -19,8 +19,10 @@ const BODY_MAX_BYTES = 8 * 1024;
 const MODEL_RE = /^[A-Za-z0-9._:@/-]{1,120}$/;
 const REPO_RE = /^[A-Za-z0-9._-]{1,80}\/[A-Za-z0-9._-]{1,80}$/;
 
-// Owner's numbers, with headroom under the measured ~90-95/min and ~940/day per (IP, model).
-export const LIMITS = { perMin: 50, perDay: 500 };
+// Owner's numbers, with headroom under the measured ~90-95/min and ~940/day per (IP, model)
+// (docs/free-tier-limits.md). 700 is the per-MODEL day cap: providers are counted apart, because
+// their quotas are apart — MiMo spending its day must not refuse Nemotron (see sharedDayCap).
+export const LIMITS = { perMin: 50, perDay: 700 };
 // `down` = the provider keeps saying the same thing (measured: 22 identical 500s in a row).
 // Silence for hours is correct there. `flaky` = alive but unreliable (measured: fledge-alpha-free
 // at ~9%) — it must be re-checked often, because every check can catch a working window.
@@ -113,6 +115,26 @@ export function budgetVerdict(counts, now = Date.now(), limits = LIMITS) {
     return { ok: false, reason: 'day', retry_after: Math.max(1_000, midnight - t) };
   }
   return { ok: true, minute, day: dayCount };
+}
+
+// The shared counter ('*','*') exists to catch "nobody counted this call", not to ration the day.
+// The quota is per (egress IP, model) and providers are counted apart, so a shared DAILY cap equal
+// to one model's cap made every provider share one allowance: MiMo spending its day refused Nemotron
+// with its own budget untouched. The shared day cap is therefore perDay × (the per-model counters
+// that moved today + 1) — by construction never tighter than the sum of the independent allowances,
+// and the +1 is the room a provider that has not called yet needs to be counted at all. Several
+// repos of the same model only make this backstop more generous, never tighter; that is the safe
+// direction for a runaway brake.
+// The shared MINUTE cap stays as it is: a rate limit that spans providers is real (OpenRouter :free
+// = 20/min per account), a per-day sum of independent quotas is not.
+export async function sharedDayCap(env, now = Date.now(), perDay = LIMITS.perDay) {
+  const day = utcDay(now);
+  let buckets = 0;
+  try {
+    buckets = (await env.ZEN_DB.prepare('SELECT COUNT(*) AS n FROM zen_budget WHERE model <> ?1 AND day = ?2')
+      .bind('*', day).first())?.n ?? 0;
+  } catch { buckets = 0; }
+  return perDay * (Math.max(0, Number(buckets) || 0) + 1);
 }
 
 // Round-robin over enabled repos. A repo that failed `failures` times in a row is skipped
@@ -289,11 +311,12 @@ export async function zenRun(request, env, fetchImpl = fetch) {
   const pick = pickNextRepo(repos, cursor);
   if (!pick) return j(503, { error: 'no usable runner repository' });
 
-  // Budget: the pair (repo, model) is the real quota; '*' is the provider-wide brake.
+  // Budget: the pair (repo, model) is the real quota and the day cap there is per model; '*' is only
+  // the runaway brake, so its day cap is the sum of the independent allowances (sharedDayCap).
   const perRepo = budgetVerdict(await readCounts(env, pick.repo, model), now,
     { perMin: Number(env.ZEN_PER_MIN) || LIMITS.perMin, perDay: Number(env.ZEN_PER_DAY) || LIMITS.perDay });
   const perAll = budgetVerdict(await readCounts(env, '*', '*'), now,
-    { perMin: Number(env.ZEN_PER_MIN) || LIMITS.perMin, perDay: Number(env.ZEN_PER_DAY) || LIMITS.perDay });
+    { perMin: Number(env.ZEN_PER_MIN) || LIMITS.perMin, perDay: await sharedDayCap(env, now, Number(env.ZEN_PER_DAY) || LIMITS.perDay) });
   for (const v of [perRepo, perAll]) {
     if (!v.ok) return j(429, { error: `budget exhausted (${v.reason})`, reason: v.reason, retry_after: v.retry_after, repo: pick.repo });
   }
