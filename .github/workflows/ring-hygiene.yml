@@ -8,6 +8,11 @@ name: ring-hygiene
 # Actions are enabled with a read-only default token, and can give the pool workflow a readable
 # display name.
 #
+# Two rules, not one: finished runs older than `keep_hours`, AND at most `max_runs` finished runs
+# kept per repository. GitHub delays `schedule` in this ring by hours (measured: the `*/2` pool scaler
+# ran 5h late), so the age window alone cannot be the guarantee — the cap is what keeps a repository's
+# Actions tab bounded even when the trigger arrives a day late or never arrives at all.
+#
 # It also prunes this repository's own finished runs (`self`, on by default): the registry does not
 # contain the housekeeping repository, so without that row its Actions tab is the one place nothing
 # ever prunes. The self row carries its own token (`github.token` + `actions: write`) and only ever
@@ -29,9 +34,15 @@ on:
     inputs:
       keep_hours:
         description: 'keep finished runs/artifacts newer than this many hours'
-        default: '24'
+        default: '6'
+      max_runs:
+        description: 'keep at most this many finished runs per repository (0 = no cap)'
+        default: '20'
+      max_artifacts:
+        description: 'keep at most this many finished artifacts per repository (0 = no cap)'
+        default: '20'
       prune_runs:
-        description: 'delete finished workflow runs older than keep_hours'
+        description: 'delete finished workflow runs older than keep_hours and beyond max_runs'
         type: boolean
         default: true
       prune_artifacts:
@@ -107,6 +118,8 @@ jobs:
             ${{ inputs.rename_workflows && '--rename-workflows' || '' }}
             ${{ inputs.dry_run && '--dry-run' || '' }}
           KEEP_HOURS: ${{ inputs.keep_hours }}
+          MAX_RUNS: ${{ inputs.max_runs }}
+          MAX_ARTIFACTS: ${{ inputs.max_artifacts }}
           FRIENDLY: ${{ inputs.friendly_name }}
           REPOS: ${{ inputs.repos }}
           SELF: ${{ inputs.self }}
@@ -114,7 +127,9 @@ jobs:
           SELF_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # On schedule there are no inputs: default to the full sweep with a 24h window.
+          # On schedule there are no inputs: default to the full sweep with a 6h window and a cap.
+          # The cap is deliberately NOT left to the workflow default — the schedule path has no inputs,
+          # so this fallback is what actually bounds growth when nobody ticks a box.
           if [ -z "${ARGS// }" ]; then ARGS='--prune-runs --prune-artifacts --harden'; fi
           # Same for `self`: on schedule the boolean input is absent, and the self sweep is exactly the
           # part that must not depend on someone ticking a box.
@@ -122,7 +137,7 @@ jobs:
           SELF_ARG=''
           if [ "$SELF" = "true" ] && [ -n "$SELF_REPO" ]; then SELF_ARG="--self $SELF_REPO"; fi
           ZEN_HYGIENE_SELF_TOKEN="$SELF_TOKEN" node scripts/ring-hygiene.mjs --ring .ring/ring.json \
-            --keep-hours "${KEEP_HOURS:-24}" \
+            --keep-hours "${KEEP_HOURS:-6}" --max-runs "${MAX_RUNS:-20}" --max-artifacts "${MAX_ARTIFACTS:-20}" \
             --friendly-name "${FRIENDLY:-Zen Pool — inference worker}" --repos "${REPOS:-}" $ARGS $SELF_ARG
           rm -f .ring/ring.json .ring/payload.json
 

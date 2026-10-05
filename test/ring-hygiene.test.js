@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rewriteWorkflowName, isPrunable, cutoffIso, pickRepos, withSelfRow } from '../scripts/ring-hygiene.mjs';
+import { rewriteWorkflowName, isPrunable, cutoffIso, pickRepos, withSelfRow, isFinished, planPrune, ensureWorkerSweep } from '../scripts/ring-hygiene.mjs';
 
 const WF = [
   'name: zen-pool',
@@ -47,11 +47,102 @@ test('isPrunable keeps fresh, running and undated runs', () => {
   assert.equal(isPrunable({ created_at: 'not-a-date', status: 'completed' }, cutoff, now), false);
 });
 
-test('cutoffIso is keep_hours before now and falls back to 24h', () => {
+test('cutoffIso is keep_hours before now and falls back to 6h', () => {
   const now = Date.parse('2026-10-05T12:00:00Z');
   assert.equal(cutoffIso(6, now), '2026-10-05T06:00:00.000Z');
-  assert.equal(cutoffIso(0, now), '2026-10-04T12:00:00.000Z');
-  assert.equal(cutoffIso('nonsense', now), '2026-10-04T12:00:00.000Z');
+  assert.equal(cutoffIso(0, now), '2026-10-05T06:00:00.000Z');
+  assert.equal(cutoffIso('nonsense', now), '2026-10-05T06:00:00.000Z');
+});
+
+test('isFinished only ever accepts a completed item', () => {
+  assert.equal(isFinished({ created_at: '2026-10-05T00:00:00Z', status: 'completed' }), true);
+  assert.equal(isFinished({ created_at: '2026-10-05T00:00:00Z' }), true);
+  assert.equal(isFinished({ created_at: '2026-10-05T00:00:00Z', status: 'in_progress' }), false);
+  assert.equal(isFinished({ created_at: '2026-10-05T00:00:00Z', status: 'queued' }), false);
+  assert.equal(isFinished({ created_at: '2026-10-05T00:00:00Z', status: 'pending' }), false);
+  assert.equal(isFinished({ created_at: '2026-10-05T00:00:00Z', status: 'waiting' }), false);
+  assert.equal(isFinished({ created_at: '2026-10-05T00:00:00Z', status: 'requested' }), false);
+  assert.equal(isFinished({ created_at: '2026-10-05T00:00:00Z', status: 'expired' }), false);
+  assert.equal(isFinished({ created_at: 'not-a-date', status: 'completed' }), false);
+  assert.equal(isFinished(null), false);
+});
+
+test('planPrune deletes by age, caps the rest and never touches live work', () => {
+  const cutoff = Date.parse('2026-10-05T06:00:00Z');
+  const now = Date.parse('2026-10-05T12:00:00Z');
+  const run = (id, at, status = 'completed') => ({ id, created_at: at, status });
+  const items = [
+    run(1, '2026-10-05T11:00:00Z'), // fresh, kept
+    run(2, '2026-10-05T10:00:00Z'), // fresh, kept
+    run(3, '2026-10-05T09:00:00Z'), // fresh, kept
+    run(4, '2026-10-05T08:00:00Z'), // fresh, kept
+    run(5, '2026-10-05T07:00:00Z'), // fresh, kept
+    run(6, '2026-10-05T05:00:00Z'), // older than the window
+    run(7, '2026-10-05T04:00:00Z'), // older than the window
+    run(8, '2026-10-05T11:30:00Z', 'in_progress'), // a live pool worker
+    run(9, '2026-10-05T11:45:00Z', 'queued'), // queued, will start in a minute
+  ];
+  const plan = planPrune(items, { cutoffMs: cutoff, max: 5, nowMs: now });
+  assert.deepEqual(plan.ids, [6, 7]);
+  assert.equal(plan.by_age, 2);
+  assert.equal(plan.by_cap, 0);
+  assert.equal(plan.kept, 5);
+  assert.equal(plan.live, 2);
+});
+
+test('planPrune keeps the newest max finished runs and drops the rest by cap', () => {
+  const cutoff = Date.parse('2026-10-05T06:00:00Z');
+  const now = Date.parse('2026-10-05T12:00:00Z');
+  const run = (id, at) => ({ id, created_at: at, status: 'completed' });
+  const items = [1, 2, 3, 4, 5, 6, 7, 8].map((i) => run(i, `2026-10-05T0${i}:00:00Z`));
+  const plan = planPrune(items, { cutoffMs: cutoff, max: 3, nowMs: now });
+  assert.deepEqual(plan.ids, [5, 4, 3, 2, 1]);
+  assert.equal(plan.by_age, 5);
+  assert.equal(plan.by_cap, 0);
+  assert.equal(plan.kept, 3);
+  assert.equal(plan.live, 0);
+});
+
+test('planPrune applies the cap to the newest runs even when the list is not sorted', () => {
+  const cutoff = Date.parse('2026-10-05T06:00:00Z');
+  const now = Date.parse('2026-10-05T12:00:00Z');
+  const run = (id, at) => ({ id, created_at: at, status: 'completed' });
+  const items = [
+    run(3, '2026-10-05T09:00:00Z'),
+    run(1, '2026-10-05T11:00:00Z'),
+    run(2, '2026-10-05T10:00:00Z'),
+  ];
+  const plan = planPrune(items, { cutoffMs: cutoff, max: 2, nowMs: now });
+  assert.deepEqual(plan.ids, [3]);
+  assert.equal(plan.kept, 2);
+});
+
+test('planPrune treats a non-positive or missing cap as no cap', () => {
+  const cutoff = Date.parse('2026-10-05T06:00:00Z');
+  const now = Date.parse('2026-10-05T12:00:00Z');
+  const run = (id, at) => ({ id, created_at: at, status: 'completed' });
+  const items = [1, 2, 3].map((i) => run(i, `2026-10-05T0${i + 6}:00:00Z`));
+  for (const max of [0, -1, 'nonsense', undefined, null]) {
+    const plan = planPrune(items, { cutoffMs: cutoff, max, nowMs: now });
+    assert.equal(plan.by_cap, 0, `max=${max}`);
+    assert.equal(plan.kept, 3, `max=${max}`);
+  }
+});
+
+test('planPrune ignores items without an id and items from the future', () => {
+  const cutoff = Date.parse('2026-10-05T06:00:00Z');
+  const now = Date.parse('2026-10-05T12:00:00Z');
+  const plan = planPrune(
+    [
+      { created_at: '2026-10-05T05:00:00Z', status: 'completed' },
+      { id: 1, created_at: '2026-10-05T13:00:00Z', status: 'completed' },
+      { id: 2, created_at: '2026-10-05T05:00:00Z', status: 'completed' },
+    ],
+    { cutoffMs: cutoff, max: 20, nowMs: now },
+  );
+  assert.deepEqual(plan.ids, [2]);
+  assert.equal(plan.kept, 0);
+  assert.equal(plan.live, 1);
 });
 
 test('pickRepos keeps enabled rows, drops malformed ones and honours a filter', () => {
@@ -90,4 +181,42 @@ test('withSelfRow never replaces a registry row and never invents a repository',
   assert.deepEqual(withSelfRow(rows, { repo: '', token: 'self' }), rows);
   assert.deepEqual(withSelfRow(rows, {}), rows);
   assert.deepEqual(withSelfRow(null, { repo: 'a/b', token: 't' }).map((r) => r.repo), ['a/b']);
+});
+
+test('ensureWorkerSweep adds the permission and the step to a provisioned worker workflow', () => {
+  const WF = [
+    'name: zen-pool',
+    'on:',
+    '  workflow_dispatch:',
+    'permissions:',
+    '  contents: read',
+    'jobs:',
+    '  pool:',
+    '    steps:',
+    '      - name: serve',
+    '        run: node scripts/zen-pool-worker.mjs',
+    '      - name: boot summary',
+    '        if: always()',
+    '        run: echo done',
+    '',
+  ].join('\n');
+  const r = ensureWorkerSweep(WF);
+  assert.equal(r.ok, true);
+  const out = r.content;
+  assert.match(out, /^  actions: write$/m);
+  assert.ok(out.indexOf('sweep own finished runs') < out.indexOf('boot summary'));
+  assert.ok(out.indexOf('sweep own finished runs') > out.indexOf('- name: serve'));
+  assert.ok(out.includes('node scripts/zen-pool-prune.mjs --keep-hours 6 --max-runs 20'));
+});
+
+test('ensureWorkerSweep is idempotent and refuses a file it cannot place the step in', () => {
+  const once = ensureWorkerSweep(
+    ['permissions:', '  contents: read', 'jobs:', '  pool:', '    steps:', '      - name: boot summary', '        run: x', ''].join('\n'),
+  );
+  assert.equal(once.ok, true);
+  const twice = ensureWorkerSweep(once.content);
+  assert.equal(twice.ok, false);
+  assert.equal(twice.reason, 'already swept');
+  assert.equal(ensureWorkerSweep('').ok, false);
+  assert.equal(ensureWorkerSweep('name: x\njobs: {}').reason, 'no boot summary step to insert before');
 });

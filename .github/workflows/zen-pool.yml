@@ -34,6 +34,10 @@ concurrency:
 
 permissions:
   contents: read
+  # The sweep at the end of a worker run deletes this repository's own finished runs. GitHub's
+  # `schedule` trigger in this ring is delayed by hours (measured), so a cron alone cannot keep the
+  # Actions tab bounded — the worker sweeps itself on the way out instead.
+  actions: write
 
 jobs:
   pool:
@@ -85,6 +89,21 @@ jobs:
           RC=$?
           echo "POOL serve_done $(date -u +%FT%TZ) rc=$RC" >> pool.log
           exit $RC
+
+      # Sweep this repository's own finished runs. Runs after `serve` so a worker that is still
+      # holding calls never prunes under itself, and `if: always()` so a worker that exits on the
+      # idle TTL still leaves a clean tab behind. Live runs (this worker, a sibling) are never
+      # touched: the policy only ever deletes `completed` ones.
+      - name: sweep own finished runs
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          echo "POOL sweep_start $(date -u +%FT%TZ)" >> pool.log
+          node scripts/zen-pool-prune.mjs --keep-hours 6 --max-runs 20
+          echo "POOL sweep_done $(date -u +%FT%TZ)" >> pool.log
 
       - name: boot summary
         if: always()

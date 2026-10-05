@@ -162,7 +162,10 @@ jobs:
         run: |
           # The source file still says `name: zen-pool`, so a provision would put the bare name back.
           # This rewrites only that one top-level line, right after the file is written.
-          node scripts/ring-hygiene.mjs --ring .ring/ring.json --rename-workflows \
+          # `--ensure-sweep` does the same for the ring-only sweep step: the worker workflow is
+          # pulled from the ladder repo, which the ring owner cannot write to, so the step that lets
+          # a worker sweep its own repository has to be injected here instead.
+          node scripts/ring-hygiene.mjs --ring .ring/ring.json --rename-workflows --ensure-sweep \
             --friendly-name "${FRIENDLY_WORKER_NAME}" || true
 
       - name: register ring rows
