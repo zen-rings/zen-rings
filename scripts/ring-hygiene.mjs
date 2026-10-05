@@ -18,8 +18,15 @@
 //   rename_workflows  give the pool workflow a human-readable display name (the `name:` line only,
 //                     nothing that can change how the worker behaves)
 //
+// `--self owner/name` adds the repository this script runs in as one more row to prune, with its token
+// taken from ZEN_HYGIENE_SELF_TOKEN. Without it the repository that owns the housekeeping workflow is
+// the one repository whose Actions tab nobody ever prunes — this sweep is what keeps that from growing
+// forever. `--self` never changes the ring registry, so it cannot make this repository a dispatch
+// target, and it only ever prunes runs/artifacts here: harden and rename are ring-wide settings and
+// stay on registry rows, which are the rows that justify them.
+//
 // Usage: node scripts/ring-hygiene.mjs [--ring .ring/ring.json] [--keep-hours 24] [--repos a/b,c/d]
-//        [--prune-runs] [--prune-artifacts] [--harden] [--rename-workflows]
+//        [--prune-runs] [--prune-artifacts] [--harden] [--rename-workflows] [--self owner/name]
 //        [--friendly-name "Zen Pool — inference worker"] [--dry-run]
 
 import { readFileSync } from 'node:fs';
@@ -70,6 +77,17 @@ export function pickRepos(rows, filter) {
     .filter((r) => r && /^[\w.-]+\/[\w.-]+$/.test(r.repo || ''))
     .filter((r) => r.enabled !== false)
     .filter((r) => !wanted.length || wanted.includes(r.repo));
+}
+
+// A ring row is a promise that the repository may be dispatched to and hardened, so it is never
+// replaced here. The self row is appended only when the repository is not in the ring at all — that is
+// the normal case for the housekeeping repository itself, which has no business being a pool target.
+export function withSelfRow(rows, self) {
+  const list = (Array.isArray(rows) ? rows : []).filter((r) => r && r.repo);
+  const repo = String(self?.repo || '').trim();
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return list;
+  if (list.some((r) => r.repo === repo)) return list;
+  return [...list, { repo, token: String(self?.token || ''), self: true }];
 }
 
 async function gh(token, method, path, body) {
@@ -188,9 +206,19 @@ async function main() {
   const doArtifacts = flag('prune-artifacts');
   const doHarden = flag('harden');
   const doRename = flag('rename-workflows');
-  const repos = pickRepos(rows, value('repos', ''));
+  const selfRepo = value('self', '');
+  const selfToken = process.env.ZEN_HYGIENE_SELF_TOKEN || '';
+  const selfAdded = selfRepo && selfToken ? withSelfRow(rows, { repo: selfRepo, token: selfToken }) : rows;
+  const repos = pickRepos(selfAdded, value('repos', ''));
   console.log(
-    JSON.stringify({ ring_rows: Array.isArray(rows) ? rows.length : 0, repos: repos.length, cutoff, keep_hours: keepHours, dry_run: dryRun }),
+    JSON.stringify({
+      ring_rows: Array.isArray(rows) ? rows.length : 0,
+      repos: repos.length,
+      self: selfRepo && selfToken ? selfRepo : 'off',
+      cutoff,
+      keep_hours: keepHours,
+      dry_run: dryRun,
+    }),
   );
   if (!repos.length) {
     console.log('nothing to do — no enabled ring rows matched');
@@ -201,6 +229,7 @@ async function main() {
     const repo = row.repo;
     const token = row.token || row.resolved_token || '';
     const entry = { repo };
+    if (row.self) entry.self = true;
     if (!token) {
       entry.error = 'no token in the registry for this row';
       report.push(entry);
@@ -208,8 +237,10 @@ async function main() {
     }
     if (doRuns) entry.runs = await pruneRuns(token, repo, cutoff, dryRun);
     if (doArtifacts) entry.artifacts = await pruneArtifacts(token, repo, cutoff, dryRun);
-    if (doHarden) entry.harden = await harden(token, repo, dryRun);
-    if (doRename) entry.rename = await renameWorkflow(token, repo, friendly, dryRun);
+    // harden and rename change how workflows of a repository run; only a registry row justifies that,
+    // so the self row prunes and nothing else.
+    if (doHarden && !row.self) entry.harden = await harden(token, repo, dryRun);
+    if (doRename && !row.self) entry.rename = await renameWorkflow(token, repo, friendly, dryRun);
     report.push(entry);
   }
   console.log(JSON.stringify({ hygiene: report }, null, 2));
