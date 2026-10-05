@@ -17,7 +17,10 @@ jobs:
         run: npx --yes wrangler@4 deploy --dry-run --outdir=dist
 
   deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Деплой переехал в trained-assist/trained-assist-llm-ladder — там и free-models.js, и весь
+    # кольцевой код. Этот репозиторий — старый снимок без src/free-models.js; его деплой молча
+    # удалил бы её из прода. Деплоер здесь выключен навсегда.
+    if: false
     needs: test
     runs-on: ubuntu-latest
     steps:
