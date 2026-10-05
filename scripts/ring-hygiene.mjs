@@ -37,6 +37,10 @@
 // missing — trigger: however late it fires, the tab cannot grow without bound.
 
 import { readFileSync } from 'node:fs';
+import { isPrunable, cutoffIso, isFinished, planPrune } from './zen-pool-policy.mjs';
+
+// Re-exported so existing tests and callers keep importing the policy from here.
+export { isPrunable, cutoffIso, isFinished, planPrune } from './zen-pool-policy.mjs';
 
 const API = 'https://api.github.com';
 const WORKER_WORKFLOW = '.github/workflows/zen-pool.yml';
@@ -59,40 +63,6 @@ export function rewriteWorkflowName(content, friendlyName) {
   return { ok: true, content: lines.join('\n'), from };
 }
 
-export function isPrunable(item, cutoffMs, nowMs) {
-  if (!item || typeof item.created_at !== 'string') return false;
-  const created = Date.parse(item.created_at);
-  if (!Number.isFinite(created)) return false;
-  if (created >= cutoffMs) return false;
-  if (item.status && item.status !== 'completed') return false;
-  if (nowMs != null && created > nowMs) return false;
-  return true;
-}
-
-export function cutoffIso(keepHours, nowMs = Date.now()) {
-  const hours = Number(keepHours);
-  const safe = Number.isFinite(hours) && hours > 0 ? hours : 6;
-  return new Date(nowMs - safe * 3600 * 1000).toISOString();
-}
-
-// A finished item is the only thing this script is ever allowed to delete. A pool worker IS an Actions
-// run, so anything that is not `completed` is a worker that is still serving requests — or a job that
-// GitHub has queued and will start in a minute.
-export function isFinished(item) {
-  if (!item || typeof item.created_at !== 'string') return false;
-  const created = Date.parse(item.created_at);
-  if (!Number.isFinite(created)) return false;
-  return !item.status || item.status === 'completed';
-}
-
-function capOf(value) {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : Infinity;
-}
-
-// The prune decision, as a pure function: finished items older than the cutoff go by age, the finished
-// items beyond the newest `max` go by cap, and everything not finished is left alone. Newest-first is
-// what the REST list already returns, but sorting here keeps the decision independent of that.
 // The worker workflow is provisioned from the ladder repo, which the ring owner cannot write to
 // (pull only), so the ring-only sweep step cannot live there. It is injected after provisioning,
 // exactly like the readable name: idempotent, and a no-op once the step is present. Two edits —
@@ -133,25 +103,6 @@ export function ensureWorkerSweep(content) {
   const stepAt = out.findIndex((l) => /^\s*- name: boot summary\s*$/.test(l));
   out = [...out.slice(0, stepAt), SWEEP_STEP, '', ...out.slice(stepAt)];
   return { ok: true, content: out.join('\n') };
-}
-
-export function planPrune(items, { cutoffMs, max = Infinity, nowMs = Date.now() } = {}) {
-  const list = Array.isArray(items) ? items.filter((it) => it && typeof it.id === 'number') : [];
-  const cap = capOf(max);
-  const finished = list
-    .filter((it) => isFinished(it) && Date.parse(it.created_at) <= nowMs)
-    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
-  const byAge = finished.filter((it) => isPrunable(it, cutoffMs, nowMs));
-  const fresh = finished.filter((it) => !isPrunable(it, cutoffMs, nowMs));
-  const kept = cap === Infinity ? fresh : fresh.slice(0, cap);
-  const byCap = cap === Infinity ? [] : fresh.slice(cap);
-  return {
-    ids: [...byAge, ...byCap].map((it) => it.id),
-    by_age: byAge.length,
-    by_cap: byCap.length,
-    kept: kept.length,
-    live: list.length - finished.length,
-  };
 }
 
 export function pickRepos(rows, filter) {
