@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rewriteWorkflowName, isPrunable, cutoffIso, pickRepos } from '../scripts/ring-hygiene.mjs';
+import { rewriteWorkflowName, isPrunable, cutoffIso, pickRepos, withSelfRow } from '../scripts/ring-hygiene.mjs';
 
 const WF = [
   'name: zen-pool',
@@ -71,4 +71,23 @@ test('rewriteWorkflowName reports the OLD name in from', () => {
   const r = rewriteWorkflowName(WF, 'Zen Pool — inference worker');
   assert.equal(r.from, 'name: zen-pool');
   assert.equal(r.content.split('\n')[0], 'name: Zen Pool — inference worker');
+});
+
+test('withSelfRow appends the housekeeping repository as a prunable row', () => {
+  const rows = [{ repo: 'llm-tests/llm-tests', token: 'ring' }];
+  const out = withSelfRow(rows, { repo: 'zen-rings/zen-rings', token: 'self' });
+  assert.deepEqual(out.map((r) => r.repo), ['llm-tests/llm-tests', 'zen-rings/zen-rings']);
+  assert.equal(out[1].self, true);
+  assert.equal(out[1].token, 'self');
+  // The self row must survive pickRepos: it is not disabled and matches an empty filter.
+  assert.deepEqual(pickRepos(out, '').map((r) => r.repo), ['llm-tests/llm-tests', 'zen-rings/zen-rings']);
+});
+
+test('withSelfRow never replaces a registry row and never invents a repository', () => {
+  const rows = [{ repo: 'zen-rings/zen-rings', token: 'ring' }];
+  assert.deepEqual(withSelfRow(rows, { repo: 'zen-rings/zen-rings', token: 'self' }), rows);
+  assert.deepEqual(withSelfRow(rows, { repo: 'not a repo', token: 'self' }), rows);
+  assert.deepEqual(withSelfRow(rows, { repo: '', token: 'self' }), rows);
+  assert.deepEqual(withSelfRow(rows, {}), rows);
+  assert.deepEqual(withSelfRow(null, { repo: 'a/b', token: 't' }).map((r) => r.repo), ['a/b']);
 });

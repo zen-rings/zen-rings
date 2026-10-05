@@ -8,6 +8,11 @@ name: ring-hygiene
 # Actions are enabled with a read-only default token, and can give the pool workflow a readable
 # display name.
 #
+# It also prunes this repository's own finished runs (`self`, on by default): the registry does not
+# contain the housekeeping repository, so without that row its Actions tab is the one place nothing
+# ever prunes. The self row carries its own token (`github.token` + `actions: write`) and only ever
+# prunes runs and artifacts — it does not harden or rename anything here.
+#
 # What it never does: it does not touch the contents of a ring repository beyond the single `name:`
 # line of the pool workflow, and it never prints, stores or forwards a token. Tokens come from the
 # registry at runtime and are `add-mask`ed before the script starts, exactly like zen-ring-sync.
@@ -47,6 +52,10 @@ on:
       repos:
         description: 'comma-separated owner/name filter (empty = every enabled ring row)'
         default: ''
+      self:
+        description: "also prune this repository's own finished runs/artifacts (needs no ring row)"
+        type: boolean
+        default: true
       dry_run:
         description: 'report what would be deleted/changed without deleting or changing anything'
         type: boolean
@@ -54,6 +63,8 @@ on:
 
 permissions:
   contents: read
+  # The self sweep deletes finished runs of this repository, which the default read-only token cannot do.
+  actions: write
 
 concurrency:
   group: ring-hygiene
@@ -98,12 +109,21 @@ jobs:
           KEEP_HOURS: ${{ inputs.keep_hours }}
           FRIENDLY: ${{ inputs.friendly_name }}
           REPOS: ${{ inputs.repos }}
+          SELF: ${{ inputs.self }}
+          SELF_REPO: ${{ github.repository }}
+          SELF_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # On schedule there are no inputs: default to the full sweep with a 24h window.
           if [ -z "${ARGS// }" ]; then ARGS='--prune-runs --prune-artifacts --harden'; fi
-          node scripts/ring-hygiene.mjs --ring .ring/ring.json --keep-hours "${KEEP_HOURS:-24}" \
-            --friendly-name "${FRIENDLY:-Zen Pool — inference worker}" --repos "${REPOS:-}" $ARGS
+          # Same for `self`: on schedule the boolean input is absent, and the self sweep is exactly the
+          # part that must not depend on someone ticking a box.
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ -z "$SELF" ]; then SELF=true; fi
+          SELF_ARG=''
+          if [ "$SELF" = "true" ] && [ -n "$SELF_REPO" ]; then SELF_ARG="--self $SELF_REPO"; fi
+          ZEN_HYGIENE_SELF_TOKEN="$SELF_TOKEN" node scripts/ring-hygiene.mjs --ring .ring/ring.json \
+            --keep-hours "${KEEP_HOURS:-24}" \
+            --friendly-name "${FRIENDLY:-Zen Pool — inference worker}" --repos "${REPOS:-}" $ARGS $SELF_ARG
           rm -f .ring/ring.json .ring/payload.json
 
       - name: ring state
