@@ -25,22 +25,22 @@
 // target, and it only ever prunes runs/artifacts here: harden and rename are ring-wide settings and
 // stay on registry rows, which are the rows that justify them.
 //
-// Usage: node scripts/ring-hygiene.mjs [--ring .ring/ring.json] [--keep-hours 6] [--repos a/b,c/d]
+// Usage: node scripts/ring-hygiene.mjs [--ring .ring/ring.json] [--keep-hours 0.45] [--repos a/b,c/d]
 //        [--prune-runs] [--prune-artifacts] [--harden] [--rename-workflows] [--self owner/name]
 //        [--max-runs 20] [--max-artifacts 20]
 //        [--friendly-name "Zen Pool — inference worker"] [--dry-run]
 //
 // Why there are two rules and not one: GitHub delays `schedule` in this ring by hours (measured: the
-// `*/2` pool scaler last ran 5h late), and a 24h age window means the Actions tab is full even when
-// the trigger works. So the age window is short (6h by default) and, on top of it, every repository is
+// `*/2` pool scaler last ran 5h late), and a long age window means the Actions tab is full even when
+// the trigger works. So the age window is short (27 minutes by default) and, on top of it, every repository is
 // capped at `max_runs` newest finished runs. The cap is what makes the sweep survive a late — or
 // missing — trigger: however late it fires, the tab cannot grow without bound.
 
 import { readFileSync } from 'node:fs';
-import { isPrunable, cutoffIso, isFinished, planPrune } from './zen-pool-policy.mjs';
+import { isPrunable, cutoffIso, isFinished, planPrune, DEFAULT_KEEP_HOURS, DEFAULT_MAX_ITEMS } from './zen-pool-policy.mjs';
 
 // Re-exported so existing tests and callers keep importing the policy from here.
-export { isPrunable, cutoffIso, isFinished, planPrune } from './zen-pool-policy.mjs';
+export { isPrunable, cutoffIso, isFinished, planPrune, DEFAULT_KEEP_HOURS, DEFAULT_MAX_ITEMS } from './zen-pool-policy.mjs';
 
 const API = 'https://api.github.com';
 const WORKER_WORKFLOW = '.github/workflows/zen-pool.yml';
@@ -65,9 +65,10 @@ export function rewriteWorkflowName(content, friendlyName) {
 
 // The worker workflow is provisioned from the ladder repo, which the ring owner cannot write to
 // (pull only), so the ring-only sweep step cannot live there. It is injected after provisioning,
-// exactly like the readable name: idempotent, and a no-op once the step is present. Two edits —
-// `actions: write` in permissions (without it github.token cannot delete a run) and the step itself,
-// placed after `serve` so a worker never prunes under itself.
+// exactly like the readable name: idempotent, and a no-op once the step is present — with one
+// exception, see refreshWorkerSweep. Two edits — `actions: write` in permissions (without it
+// github.token cannot delete a run) and the step itself, placed after `serve` so a worker never
+// prunes under itself.
 const SWEEP_STEP = [
   '      # Sweep this repository\'s own finished runs. Runs after `serve` so a worker that is still',
   '      # holding calls never prunes under itself, and `if: always()` so a worker that exits on the',
@@ -81,13 +82,34 @@ const SWEEP_STEP = [
   '        run: |',
   '          set -uo pipefail',
   '          echo "POOL sweep_start $(date -u +%FT%TZ)" >> pool.log',
-  '          node scripts/zen-pool-prune.mjs --keep-hours 6 --max-runs 20',
+  `          node scripts/zen-pool-prune.mjs --keep-hours ${DEFAULT_KEEP_HOURS} --max-runs ${DEFAULT_MAX_ITEMS}`,
   '          echo "POOL sweep_done $(date -u +%FT%TZ)" >> pool.log',
 ].join('\n');
 
+const SWEEP_INVOCATION = /^[ \t]*node scripts\/zen-pool-prune\.mjs.*$/m;
+
+function sweepInvocation() {
+  return `node scripts/zen-pool-prune.mjs --keep-hours ${DEFAULT_KEEP_HOURS} --max-runs ${DEFAULT_MAX_ITEMS}`;
+}
+
+// A repository provisioned by an earlier version already carries the step, with the arguments of that
+// day baked into it. "Already swept" therefore cannot mean "nothing to do": the retention window is a
+// decision that changes (it is 27 minutes now, not 6 hours), and this invocation is the only thing that
+// can carry a new window into a ring repository — the workflow itself is provisioned from a repository
+// this project cannot write to. So an existing step is refreshed to the current arguments, and only a
+// step that already carries them is reported as a no-op.
+function refreshWorkerSweep(content) {
+  const at = content.match(SWEEP_INVOCATION);
+  if (!at) return { ok: false, reason: 'sweep step present but no prune invocation to refresh' };
+  const indent = at[0].slice(0, at[0].length - at[0].trimStart().length);
+  const next = `${indent}${sweepInvocation()}`;
+  if (at[0] === next) return { ok: false, reason: 'already swept' };
+  return { ok: true, content: content.replace(SWEEP_INVOCATION, next), from: at[0].trim(), reason: 'sweep args refreshed' };
+}
+
 export function ensureWorkerSweep(content) {
   if (typeof content !== 'string' || !content.trim()) return { ok: false, reason: 'empty file' };
-  if (content.includes('sweep own finished runs')) return { ok: false, reason: 'already swept' };
+  if (content.includes('sweep own finished runs')) return refreshWorkerSweep(content);
   const lines = content.split('\n');
   const at = lines.findIndex((l) => /^\s*- name: boot summary\s*$/.test(l));
   if (at === -1) return { ok: false, reason: 'no boot summary step to insert before' };
@@ -265,9 +287,9 @@ function value(name, fallback) {
 async function main() {
   const ringPath = value('ring', '.ring/ring.json');
   const rows = JSON.parse(readFileSync(ringPath, 'utf8'));
-  const keepHours = value('keep-hours', '6');
-  const maxRuns = value('max-runs', '20');
-  const maxArtifacts = value('max-artifacts', '20');
+  const keepHours = value('keep-hours', String(DEFAULT_KEEP_HOURS));
+  const maxRuns = value('max-runs', String(DEFAULT_MAX_ITEMS));
+  const maxArtifacts = value('max-artifacts', String(DEFAULT_MAX_ITEMS));
   const cutoff = cutoffIso(keepHours);
   const friendly = value('friendly-name', 'Zen Pool — inference worker');
   const dryRun = flag('dry-run');

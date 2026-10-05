@@ -1,6 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rewriteWorkflowName, isPrunable, cutoffIso, pickRepos, withSelfRow, isFinished, planPrune, ensureWorkerSweep } from '../scripts/ring-hygiene.mjs';
+import {
+  rewriteWorkflowName,
+  isPrunable,
+  cutoffIso,
+  pickRepos,
+  withSelfRow,
+  isFinished,
+  planPrune,
+  ensureWorkerSweep,
+  DEFAULT_KEEP_HOURS,
+  DEFAULT_MAX_ITEMS,
+} from '../scripts/ring-hygiene.mjs';
 
 const WF = [
   'name: zen-pool',
@@ -47,11 +58,17 @@ test('isPrunable keeps fresh, running and undated runs', () => {
   assert.equal(isPrunable({ created_at: 'not-a-date', status: 'completed' }, cutoff, now), false);
 });
 
-test('cutoffIso is keep_hours before now and falls back to 6h', () => {
+test('cutoffIso is keep_hours before now and falls back to 27 minutes', () => {
   const now = Date.parse('2026-10-05T12:00:00Z');
   assert.equal(cutoffIso(6, now), '2026-10-05T06:00:00.000Z');
-  assert.equal(cutoffIso(0, now), '2026-10-05T06:00:00.000Z');
-  assert.equal(cutoffIso('nonsense', now), '2026-10-05T06:00:00.000Z');
+  assert.equal(cutoffIso(DEFAULT_KEEP_HOURS, now), '2026-10-05T11:33:00.000Z');
+  assert.equal(cutoffIso(0, now), '2026-10-05T11:33:00.000Z');
+  assert.equal(cutoffIso('nonsense', now), '2026-10-05T11:33:00.000Z');
+});
+
+test('the default window is 27 minutes and the cap is 20', () => {
+  assert.equal(DEFAULT_KEEP_HOURS * 60, 27);
+  assert.equal(DEFAULT_MAX_ITEMS, 20);
 });
 
 test('isFinished only ever accepts a completed item', () => {
@@ -206,7 +223,7 @@ test('ensureWorkerSweep adds the permission and the step to a provisioned worker
   assert.match(out, /^  actions: write$/m);
   assert.ok(out.indexOf('sweep own finished runs') < out.indexOf('boot summary'));
   assert.ok(out.indexOf('sweep own finished runs') > out.indexOf('- name: serve'));
-  assert.ok(out.includes('node scripts/zen-pool-prune.mjs --keep-hours 6 --max-runs 20'));
+  assert.ok(out.includes(`node scripts/zen-pool-prune.mjs --keep-hours ${DEFAULT_KEEP_HOURS} --max-runs ${DEFAULT_MAX_ITEMS}`));
 });
 
 test('ensureWorkerSweep is idempotent and refuses a file it cannot place the step in', () => {
@@ -219,4 +236,22 @@ test('ensureWorkerSweep is idempotent and refuses a file it cannot place the ste
   assert.equal(twice.reason, 'already swept');
   assert.equal(ensureWorkerSweep('').ok, false);
   assert.equal(ensureWorkerSweep('name: x\njobs: {}').reason, 'no boot summary step to insert before');
+});
+
+test('a sweep step provisioned with the old window is refreshed, not left as a no-op', () => {
+  const stale = [
+    '      - name: sweep own finished runs',
+    '        run: |',
+    '          node scripts/zen-pool-prune.mjs --keep-hours 6 --max-runs 20',
+    '      - name: boot summary',
+    '',
+  ].join('\n');
+  const refreshed = ensureWorkerSweep(stale);
+  assert.equal(refreshed.ok, true);
+  assert.equal(refreshed.reason, 'sweep args refreshed');
+  assert.equal(refreshed.from, 'node scripts/zen-pool-prune.mjs --keep-hours 6 --max-runs 20');
+  assert.ok(refreshed.content.includes(`node scripts/zen-pool-prune.mjs --keep-hours ${DEFAULT_KEEP_HOURS} --max-runs ${DEFAULT_MAX_ITEMS}`));
+  assert.ok(!refreshed.content.includes('--keep-hours 6'));
+  assert.equal(refreshed.content.split('sweep own finished runs').length, 2);
+  assert.equal(ensureWorkerSweep(refreshed.content).reason, 'already swept');
 });

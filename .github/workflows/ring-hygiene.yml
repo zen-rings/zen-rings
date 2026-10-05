@@ -13,6 +13,11 @@ name: ring-hygiene
 # ran 5h late), so the age window alone cannot be the guarantee — the cap is what keeps a repository's
 # Actions tab bounded even when the trigger arrives a day late or never arrives at all.
 #
+# The window is 27 minutes (0.45 h), because a pool worker lives at most 30 minutes: by the time its
+# run is finished it is already history. The odd number is deliberate — a cutoff on an hour boundary
+# would sweep a whole hour of workers at once. `ensure_sweep` also carries this window into each ring
+# repository, where the worker sweeps its own finished runs on the way out.
+#
 # It also prunes this repository's own finished runs (`self`, on by default): the registry does not
 # contain the housekeeping repository, so without that row its Actions tab is the one place nothing
 # ever prunes. The self row carries its own token (`github.token` + `actions: write`) and only ever
@@ -27,14 +32,17 @@ name: ring-hygiene
 
 on:
   schedule:
-    # GitHub delays `schedule` in these repositories by minutes to hours; pruning is not time-critical,
-    # so an hourly tick is enough and a late one changes nothing.
-    - cron: '17 * * * *'
+    # The retention window is 27 minutes, so a tick has to be finer than that or the effective
+    # retention is the window plus the tick (an hourly tick would hold a finished run for 27–87 min).
+    # Off-round minutes on purpose: GitHub fires cron at :00 in an unusually large burst, and a
+    # housekeeping job has no business joining it. The age window is a nicety — `max_runs`/`max_artifacts`
+    # are what bound the tab when GitHub delivers the trigger hours late, which it does in this ring.
+    - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
     inputs:
       keep_hours:
-        description: 'keep finished runs/artifacts newer than this many hours'
-        default: '6'
+        description: 'keep finished runs/artifacts newer than this many hours (0.45 = 27 minutes)'
+        default: '0.45'
       max_runs:
         description: 'keep at most this many finished runs per repository (0 = no cap)'
         default: '20'
@@ -65,6 +73,10 @@ on:
         default: ''
       self:
         description: "also prune this repository's own finished runs/artifacts (needs no ring row)"
+        type: boolean
+        default: true
+      ensure_sweep:
+        description: 'make sure every ring repository\'s worker workflow carries the current sweep window'
         type: boolean
         default: true
       dry_run:
@@ -117,6 +129,7 @@ jobs:
             ${{ inputs.harden && '--harden' || '' }}
             ${{ inputs.rename_workflows && '--rename-workflows' || '' }}
             ${{ inputs.dry_run && '--dry-run' || '' }}
+            ${{ inputs.ensure_sweep && '--ensure-sweep' || '' }}
           KEEP_HOURS: ${{ inputs.keep_hours }}
           MAX_RUNS: ${{ inputs.max_runs }}
           MAX_ARTIFACTS: ${{ inputs.max_artifacts }}
@@ -127,17 +140,18 @@ jobs:
           SELF_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # On schedule there are no inputs: default to the full sweep with a 6h window and a cap.
-          # The cap is deliberately NOT left to the workflow default — the schedule path has no inputs,
-          # so this fallback is what actually bounds growth when nobody ticks a box.
-          if [ -z "${ARGS// }" ]; then ARGS='--prune-runs --prune-artifacts --harden'; fi
+          # On schedule there are no inputs: default to the full sweep with a 27 minute window, a cap
+          # and the sweep refresh. The window and the cap are deliberately NOT left to the workflow
+          # default — the schedule path has no inputs, so these fallbacks are what actually apply when
+          # nobody ticks a box, and they are the numbers the owner asked for.
+          if [ -z "${ARGS// }" ]; then ARGS='--prune-runs --prune-artifacts --harden --ensure-sweep'; fi
           # Same for `self`: on schedule the boolean input is absent, and the self sweep is exactly the
           # part that must not depend on someone ticking a box.
           if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ -z "$SELF" ]; then SELF=true; fi
           SELF_ARG=''
           if [ "$SELF" = "true" ] && [ -n "$SELF_REPO" ]; then SELF_ARG="--self $SELF_REPO"; fi
           ZEN_HYGIENE_SELF_TOKEN="$SELF_TOKEN" node scripts/ring-hygiene.mjs --ring .ring/ring.json \
-            --keep-hours "${KEEP_HOURS:-6}" --max-runs "${MAX_RUNS:-20}" --max-artifacts "${MAX_ARTIFACTS:-20}" \
+            --keep-hours "${KEEP_HOURS:-0.45}" --max-runs "${MAX_RUNS:-20}" --max-artifacts "${MAX_ARTIFACTS:-20}" \
             --friendly-name "${FRIENDLY:-Zen Pool — inference worker}" --repos "${REPOS:-}" $ARGS $SELF_ARG
           rm -f .ring/ring.json .ring/payload.json
 
