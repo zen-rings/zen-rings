@@ -7,7 +7,9 @@ One Cloudflare Worker, two jobs:
 2. **LLM pool** — a ring of GitHub Actions repos that make the free calls for you, round-robin,
    so no single address's quota is the ceiling.
 
-Live: `https://llm-ladder.trainedassist.store` · worker `trained-assist-llm-ladder`, no VM.
+Live: `https://zen-rings.trainedassist.store` · worker `zen-rings`, no VM. This worker is its own —
+it is **not** the company ladder worker `trained-assist-llm-ladder` (`llm-ladder.trainedassist.store`),
+so a deploy from this repository can never overwrite the ladder that real users call.
 
 ---
 

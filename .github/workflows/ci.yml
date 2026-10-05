@@ -17,10 +17,10 @@ jobs:
         run: npx --yes wrangler@4 deploy --dry-run --outdir=dist
 
   deploy:
-    # Деплой переехал в trained-assist/trained-assist-llm-ladder — там и free-models.js, и весь
-    # кольцевой код. Этот репозиторий — старый снимок без src/free-models.js; его деплой молча
-    # удалил бы её из прода. Деплоер здесь выключен навсегда.
-    if: false
+    # Deploy only from main. This repository owns the Zen worker `zen-rings`
+    # (zen-rings.trainedassist.store) — a worker of its own, so a push here can never overwrite
+    # the company ladder worker `trained-assist-llm-ladder` that serves real users.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -50,13 +50,13 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          if CREATE_OUT=$(npx --yes wrangler@4 d1 create trained-assist-llm-ladder-trace 2>&1); then
+          if CREATE_OUT=$(npx --yes wrangler@4 d1 create zen-rings-trace 2>&1); then
             DB_ID=$(printf '%s' "$CREATE_OUT" | grep -oE 'database_id = "[0-9a-f-]+"' | grep -oE '[0-9a-f-]{36}')
           else
-            DB_ID=$(npx --yes wrangler@4 d1 list --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print([x.get("uuid") for x in d if x.get("name")=="trained-assist-llm-ladder-trace"][0])')
+            DB_ID=$(npx --yes wrangler@4 d1 list --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print([x.get("uuid") for x in d if x.get("name")=="zen-rings-trace"][0])')
           fi
           echo "DB_ID=$DB_ID" >> "$GITHUB_ENV"
-          sed -i "s/00000000-0000-0000-0000-000000000000/$DB_ID/" wrangler.toml
+          sed -i "s/11111111-1111-1111-1111-111111111111/$DB_ID/" wrangler.toml
       - name: Provision D1 zen database
         if: steps.gate.outputs.deploy == 'true'
         env:
@@ -64,26 +64,26 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          if CREATE_OUT=$(npx --yes wrangler@4 d1 create trained-assist-llm-ladder-zen 2>&1); then
+          if CREATE_OUT=$(npx --yes wrangler@4 d1 create zen-rings-zen 2>&1); then
             ZEN_ID=$(printf '%s' "$CREATE_OUT" | grep -oE 'database_id = "[0-9a-f-]+"' | grep -oE '[0-9a-f-]{36}')
           else
-            ZEN_ID=$(npx --yes wrangler@4 d1 list --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print([x.get("uuid") for x in d if x.get("name")=="trained-assist-llm-ladder-zen"][0])')
+            ZEN_ID=$(npx --yes wrangler@4 d1 list --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print([x.get("uuid") for x in d if x.get("name")=="zen-rings-zen"][0])')
           fi
           echo "ZEN_ID=$ZEN_ID" >> "$GITHUB_ENV"
-          # Only the zen placeholder is left — the trace one was already substituted above.
-          sed -i "s/00000000-0000-0000-0000-000000000000/$ZEN_ID/" wrangler.toml
+          # Each binding has its own placeholder, so the two seds cannot collide.
+          sed -i "s/22222222-2222-2222-2222-222222222222/$ZEN_ID/" wrangler.toml
       - name: Apply zen schema
         if: steps.gate.outputs.deploy == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        run: npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-zen --file schema/zen.sql --remote
+        run: npx --yes wrangler@4 d1 execute zen-rings-zen --file schema/zen.sql --remote
       - name: Apply zen-pool schema
         if: steps.gate.outputs.deploy == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        run: npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-zen --file schema/zen-pool.sql --remote
+        run: npx --yes wrangler@4 d1 execute zen-rings-zen --file schema/zen-pool.sql --remote
       - name: Publish zen-runner secrets
         if: steps.gate.outputs.deploy == 'true'
         env:
@@ -111,14 +111,14 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        run: npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-trace --file schema/ladder_calls.sql --remote
+        run: npx --yes wrangler@4 d1 execute zen-rings-trace --file schema/ladder_calls.sql --remote
       - name: Migrate trace schema
         if: steps.gate.outputs.deploy == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         # ADD COLUMN is not idempotent in SQLite; a duplicate-column error = already applied.
-        run: npx --yes wrangler@4 d1 execute trained-assist-llm-ladder-trace --file schema/migrations/0002_tokens_cached.sql --remote || true
+        run: npx --yes wrangler@4 d1 execute zen-rings-trace --file schema/migrations/0002_tokens_cached.sql --remote || true
       - name: Deploy
         if: steps.gate.outputs.deploy == 'true'
         env:
@@ -129,7 +129,7 @@ jobs:
         if: steps.gate.outputs.deploy == 'true'
         run: |
           for i in 1 2 3 4 5 6; do
-            curl -fsS https://llm-ladder.trainedassist.store/health && curl -fsS https://llm-ladder.trainedassist.store/zen/health && curl -fsS https://llm-ladder.trainedassist.store/zen/pool/health && exit 0
+            curl -fsS https://zen-rings.trainedassist.store/health && curl -fsS https://zen-rings.trainedassist.store/zen/health && curl -fsS https://zen-rings.trainedassist.store/zen/pool/health && exit 0
             sleep 10
           done
           exit 1
