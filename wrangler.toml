@@ -11,29 +11,26 @@ routes = [
 ]
 
 
-# Persistent Workers Logs (queryable in the dashboard) — every ladder call logs its attempts.
+# Persistent Workers Logs (queryable in the dashboard) — every ring call logs its attempts.
 [observability]
 enabled = true
 
-# One global LadderState instance: model health + Go key rotation, strongly consistent.
-[[durable_objects.bindings]]
-name = "LADDER_STATE"
-class_name = "LadderState"
+# LadderState (model health + Go key rotation) and LADDER_TRACE_DB served the chat API this
+# worker no longer has. They were created by migration v1 on the *deployed* worker, so v1 stays
+# untouched as history and the class is retired in its own tag — wrangler refuses to edit an
+# applied migration. NOTE: run `wrangler migrations list` before the first deploy after this
+# change and confirm the deletion is pending; that is the one step that cannot be tested offline.
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["LadderState"]
 
-# Trace calls D1: one row per /v1/chat/completions, keyed by the caller's trace ids
-# (x-ladder-trace/run/user/chat/session — set by the agent runner). The deploy job
-# (ci.yml) provisions the database and rewrites the placeholder id before deploying.
-[[d1_databases]]
-binding = "LADDER_TRACE_DB"
-database_name = "zen-rings-trace"
-database_id = "11111111-1111-1111-1111-111111111111"
+[[migrations]]
+tag = "v2"
+deleted_classes = ["LadderState"]
 
-# Secrets (wrangler secret put): LADDER_TOKEN, OPENCODE_GO_API_KEYS, OPENROUTER_API_KEY,
-# OPENCODE_ZEN_RELAY_TOKEN, POOL_TRIGGER_TOKEN, GITHUB_AI_AGENT_RUNS_POOL
+# Secrets (wrangler secret put): POOL_TRIGGER_TOKEN, GITHUB_AI_AGENT_RUNS_POOL, ZEN_RUNNER_TOKEN,
+# ZEN_TOKEN_KEY, ZEN_RING_ADMIN_TOKEN. No LADDER_TOKEN: there is no ladder here to authenticate.
 
 # Zen Runner — availability table, budget counters and the runner-repository registry. Separate
 # database on purpose: it is written by a cron sweep, and a stuck write must never touch traces.

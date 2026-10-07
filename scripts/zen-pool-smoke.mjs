@@ -13,7 +13,7 @@
 //
 // Exit 0 only when steps 1-4 all produced real text; a green run must never mean "nothing ran".
 
-const base = (process.env.ZEN_RUNNER_URL || 'https://llm-ladder.trainedassist.store').replace(/\/+$/, '');
+const base = (process.env.ZEN_RUNNER_URL || 'https://zen-rings.trainedassist.store').replace(/\/+$/, '');
 const token = String(process.env.ZEN_RUNNER_TOKEN || '').trim();
 const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
 const out = [];

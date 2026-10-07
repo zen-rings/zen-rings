@@ -11,7 +11,7 @@
 // watchdog fired and the answer never arrived.
 
 const T0 = Date.now();
-const base = (process.env.ZEN_RUNNER_URL || 'https://llm-ladder.trainedassist.store').replace(/\/+$/, '');
+const base = (process.env.ZEN_RUNNER_URL || 'https://zen-rings.trainedassist.store').replace(/\/+$/, '');
 const token = String(process.env.ZEN_RUNNER_TOKEN || '').trim();
 
 function parse(argv) {

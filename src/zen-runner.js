@@ -331,7 +331,7 @@ export async function zenRun(request, env, fetchImpl = fetch) {
     res = await fetchImpl(`https://api.github.com/repos/${pick.repo}/dispatches`, {
       method: 'POST',
       headers: { authorization: `token ${token}`, 'content-type': 'application/json',
-        accept: 'application/vnd.github+json', 'user-agent': 'trained-assist-llm-ladder' },
+        accept: 'application/vnd.github+json', 'user-agent': 'zen-rings' },
       body: JSON.stringify({ event_type: 'zen-run', client_payload: { run_id: id, model, runs, location: pick.row.location || '', requested_at: new Date(now).toISOString() } }),
       signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
     });

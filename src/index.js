@@ -1,13 +1,16 @@
-// trained-assist-llm-ladder — OpenAI-compatible chat completions over a model ladder
-// (OpenCode Go → paid OpenRouter last) for small service LLM calls across trained-assist repos.
+// zen-rings — the ring of GitHub Actions repositories that makes the free zen calls:
+// the registry of ring repositories, the lease protocol with the long-lived job, the budget
+// counters and the autoscaler. It serves no chat surface of its own — there is no /v1 here on
+// purpose; a caller wanting completions talks to a ladder worker, and a ladder worker that wants
+// a free answer calls this one (POST /zen/pool/invoke, Bearer ZEN_RUNNER_TOKEN).
 //
-//   GET  /health                 liveness + ladder names (no auth)
-//   GET  /pool/health            pool receiver liveness, {service:"pool",ok:true} (no auth)
+//   GET  /health                 liveness, {ok:true,service:"zen-ring"} (no auth)
+//   GET  /pool/health            runs-pool receiver liveness (no auth)
 //   POST /pool/trigger           runs-pool dispatch, Bearer POOL_TRIGGER_TOKEN, body ≤ 8 KB (own token)
 //   GET  /zen/health             zen-runner liveness: registry size, model count, live caps (no auth)
 //   GET  /zen/models             availability table + "call it or skip it" verdict (ZEN_RUNNER_TOKEN)
 //   POST /zen/run                {model,runs?} → 202 run_id | 409 quarantine | 429 budget | 502 GitHub
-//   POST /zen/report             {run_id?,model,ok,kind?,error?} → the state the ladder reads back
+//   POST /zen/report             {run_id?,model,ok,kind?,error?} → the state the caller reads back
 //   POST /zen/repos              registry row (repo + encrypted token or env:NAME), round-robin ring
 //                                (ZEN_RING_ADMIN_TOKEN — not the ring member's token)
 //   GET  /zen/ring/repos         the ring registry read out, no tokens in it (ZEN_RING_ADMIN_TOKEN)
@@ -19,26 +22,17 @@
 //   POST /zen/pool/stop          tell a job to exit on its next pull
 //   GET  /zen/pool/result/{id}   the answer whenever it lands, even after a 504
 //   GET  /zen/pool/health        how many jobs are live right now (no auth)
-//   GET  /v1/models              ladders as model ids (auth)
-//   GET  /v1/state               model health + key rotation snapshot (auth)
-//   POST /v1/state/reset-keys    unpark all Go keys + Go rungs (auth, ops lever)
-//   POST /v1/chat/completions    body.model = ladder ("service", legacy alias "deepseek", "service:review") (auth)
+//   GET  /zen/pool/metrics       autoscaler inputs + verdict (ZEN_RUNNER_TOKEN)
+//   POST /zen/pool/scale         run the autoscaler now (ZEN_RUNNER_TOKEN)
 //
-// Auth: `Authorization: Bearer <LADDER_TOKEN>`. Non-streaming → a normal chat.completion whose
-// `model` is the rung that answered (also in `x-ladder-model`). stream:true → SSE relayed from
-// the chosen rung (chosen before the first token; no failover after it) — how opencode uses the
-// `free` model. Tools pass through as is. Optional body fields: ladder_timeout_ms (per
-// rung, non-stream), ladder_ttfb_ms (stream: first-token window), ladder_total_timeout_ms,
-// ladder_rung (benchmarks: pin one rung of the ladder, no failover).
-//
-// This file is the Worker entry: it wires the Durable Object binding and dispatches to the route
-// in src/handler.js (kept free of the Workerd runtime so plain `node --test` can exercise it).
+// Auth: each route names its own token; there is no single ladder token, because there is no
+// ladder here. This file is the Worker entry: it dispatches to src/handler.js, kept free of the
+// Workerd runtime so plain `node --test` can exercise it.
 
 import { handle } from './handler.js';
 import { zenSweep } from './zen-runner.js';
 
-export { LadderState } from './state-do.js';
-export { handle, makeStore } from './handler.js';
+export { handle } from './handler.js';
 
 export default {
   fetch(request, env) {

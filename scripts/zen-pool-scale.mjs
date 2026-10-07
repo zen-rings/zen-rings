@@ -105,7 +105,7 @@ async function main() {
     const d = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/zen-pool.yml/dispatches`, {
       method: 'POST',
       headers: { authorization: `token ${ghToken}`, 'content-type': 'application/json',
-        accept: 'application/vnd.github+json', 'user-agent': 'trained-assist-llm-ladder' },
+        accept: 'application/vnd.github+json', 'user-agent': 'zen-rings' },
       body: JSON.stringify({ ref: process.env.SCALE_REF || 'main', inputs: {
         idle_exit: String(idleExit),
         max_tasks: '0',

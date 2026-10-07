@@ -34,10 +34,16 @@ test('GET /pool/health — open, no auth, no ladder token involved', async () =>
   assert.deepEqual(await bare.json(), { service: 'pool', ok: true });
 });
 
-test('ladder gate untouched: /pool routes sit beside it, /v1 still needs LADDER_TOKEN', async () => {
-  // ENV has no LADDER_TOKEN — the pool routes answer, the ladder routes still 401.
+test('no ladder surface: /v1 is gone, not gated — the ring carries no chat routes at all', async () => {
+  // Before the ring-only trim /v1/models answered 401 (auth gate). The routes were removed
+  // entirely instead of being gated: this worker has no ladder to serve.
   const models = await handle(new Request('https://l.test/v1/models'), ENV, {});
-  assert.equal(models.status, 401);
+  assert.equal(models.status, 404);
+  const chat = await handle(new Request('https://l.test/v1/chat/completions'), ENV, {});
+  assert.equal(chat.status, 404);
+  // and the ring routes are unaffected
+  const h = await handle(new Request('https://l.test/pool/health'), ENV, {});
+  assert.equal(h.status, 200);
 });
 
 test('POST /pool/trigger: secrets not set → 503 CONFIG, fetch never called', async () => {

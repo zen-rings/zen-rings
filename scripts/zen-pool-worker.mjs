@@ -13,7 +13,7 @@
 // a green job must never mean "nothing ran"), 3 = the pool is unreachable/misconfigured.
 //
 // Usage:
-//   node scripts/zen-pool-worker.mjs --url https://llm-ladder.trainedassist.store \
+//   node scripts/zen-pool-worker.mjs --url https://zen-rings.trainedassist.store \
 //       --token $ZEN_RUNNER_TOKEN [--idle-exit 600000] [--max-tasks 0]
 
 import { writeFileSync } from 'node:fs';

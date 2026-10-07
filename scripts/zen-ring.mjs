@@ -11,7 +11,7 @@
 // The admin token (ZEN_RING_ADMIN_TOKEN) is the high-privilege one: it is in this repository's
 // Actions secrets and in the owner's shell. A ring member never has it — that is the whole point.
 
-const BASE = process.env.ZEN_RUNNER_URL || 'https://llm-ladder.trainedassist.store';
+const BASE = process.env.ZEN_RUNNER_URL || 'https://zen-rings.trainedassist.store';
 const token = process.env.ZEN_RING_ADMIN_TOKEN || '';
 
 async function call(method, path, body) {

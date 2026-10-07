@@ -259,7 +259,7 @@ async function dispatchPoolWorker(env, repo, row, token, { idleExitMs, runId, no
   const res = await fetchImpl(`https://api.github.com/repos/${repo}/dispatches`, {
     method: 'POST',
     headers: { authorization: `token ${token}`, 'content-type': 'application/json',
-      accept: 'application/vnd.github+json', 'user-agent': 'trained-assist-llm-ladder' },
+      accept: 'application/vnd.github+json', 'user-agent': 'zen-rings' },
     body: JSON.stringify({ event_type: 'zen-pool', client_payload: {
       run_id: runId, idle_exit_ms: idleExitMs, max_tasks: 0, out: 'zen-pool-last.json',
       requested_at: new Date(now).toISOString(), location: row?.location || '',

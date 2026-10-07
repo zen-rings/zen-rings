@@ -158,7 +158,7 @@ export function classify(status, headers, bodyText) {
   return { kind: 'error', retryable: false };
 }
 
-// SSE → one chat.completion. Same fold as scripts/zen-relay.mjs (aggregateSse there) — kept as a
+// SSE → one chat.completion. The same fold the relay uses (aggregateSse there) — kept as a
 // copy on purpose so this module stays self-contained and can be vendored into a job's own repo
 // without dragging the relay in. If you change one, change the other.
 export function aggregateSse(text) {

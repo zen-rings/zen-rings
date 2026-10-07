@@ -43,20 +43,6 @@ jobs:
         if: steps.gate.outputs.deploy == 'true'
         with:
           node-version: 22
-      - name: Provision D1 trace database
-        if: steps.gate.outputs.deploy == 'true'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        run: |
-          set -euo pipefail
-          if CREATE_OUT=$(npx --yes wrangler@4 d1 create zen-rings-trace 2>&1); then
-            DB_ID=$(printf '%s' "$CREATE_OUT" | grep -oE 'database_id = "[0-9a-f-]+"' | grep -oE '[0-9a-f-]{36}')
-          else
-            DB_ID=$(npx --yes wrangler@4 d1 list --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print([x.get("uuid") for x in d if x.get("name")=="zen-rings-trace"][0])')
-          fi
-          echo "DB_ID=$DB_ID" >> "$GITHUB_ENV"
-          sed -i "s/11111111-1111-1111-1111-111111111111/$DB_ID/" wrangler.toml
       - name: Provision D1 zen database
         if: steps.gate.outputs.deploy == 'true'
         env:
@@ -106,19 +92,6 @@ jobs:
           else
             echo "::warning title=Ring admin token missing::ZEN_RING_ADMIN_TOKEN is not set in this repository, so /zen/ring/repos and /zen/ring/payload stay closed."
           fi
-      - name: Apply trace schema
-        if: steps.gate.outputs.deploy == 'true'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        run: npx --yes wrangler@4 d1 execute zen-rings-trace --file schema/ladder_calls.sql --remote
-      - name: Migrate trace schema
-        if: steps.gate.outputs.deploy == 'true'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-        # ADD COLUMN is not idempotent in SQLite; a duplicate-column error = already applied.
-        run: npx --yes wrangler@4 d1 execute zen-rings-trace --file schema/migrations/0002_tokens_cached.sql --remote || true
       - name: Deploy
         if: steps.gate.outputs.deploy == 'true'
         env:

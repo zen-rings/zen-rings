@@ -6,8 +6,6 @@
   "description": "OpenAI-compatible model ladder (OpenCode Go → OpenRouter last) for trained-assist service LLM calls — Cloudflare Worker",
   "scripts": {
     "test": "node --test test/*.test.js",
-    "test:sandbox": "bash scripts/sandbox/sticky-rung.sh",
-    "gate": "node scripts/live-gate.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },
