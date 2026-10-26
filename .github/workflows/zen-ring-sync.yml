@@ -67,7 +67,7 @@ jobs:
         env:
           BASE: ${{ vars.ZEN_RUNNER_URL }}
           SOURCE: ${{ inputs.source }}
-          RING_ADMIN: ${{ secrets.ZEN_RING_ADMIN_TOKEN }}
+          RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
           RING_PAYLOAD: ${{ secrets.ZEN_RING_PAYLOAD }}
           RING_IMPORT: ${{ secrets.ZEN_RING_IMPORT }}
         run: |
@@ -76,7 +76,7 @@ jobs:
           mkdir -p .ring
           if [ "$SOURCE" = "cf" ]; then
             code=$(curl -sS -o .ring/payload.json -w '%{http_code}' \
-              -H "authorization: Bearer $RING_ADMIN" -H 'accept: application/json' "$BASE/zen/ring/payload")
+              -H "authorization: Bearer $RUNNER_TOKEN" -H 'accept: application/json' "$BASE/zen/ring/payload")
             if [ "$code" != "200" ]; then
               echo "::error::the ring registry did not answer ($code): $(jq -r '.error // "no detail"' .ring/payload.json 2>/dev/null || echo unreadable)"
               echo "::error::the ring lives in the worker's D1 now — fix ZEN_RING_ADMIN_TOKEN in this repo, or run with source=gh-import and a ZEN_RING_IMPORT secret."
@@ -101,7 +101,7 @@ jobs:
         if: ${{ inputs.import }}
         env:
           BASE: ${{ vars.ZEN_RUNNER_URL }}
-          RING_ADMIN: ${{ secrets.ZEN_RING_ADMIN_TOKEN }}
+          RUNNER_TOKEN: ${{ secrets.ZEN_RUNNER_TOKEN }}
         run: |
           set -euo pipefail
           jq -c '.[]' .ring/ring.json | while read -r row; do
@@ -110,7 +110,7 @@ jobs:
                    + (if .token then {token:.token} else {} end)
                    + (if .token_ref then {token_ref:.token_ref} else {} end)' <<<"$row" > /tmp/body.json
             code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST "$BASE/zen/repos" \
-              -H "authorization: Bearer $RING_ADMIN" -H 'content-type: application/json' --data @/tmp/body.json)
+              -H "authorization: Bearer $RUNNER_TOKEN" -H 'content-type: application/json' --data @/tmp/body.json)
             echo "import $repo http=$code $(jq -r '.error // "ok"' /tmp/resp.json 2>/dev/null || echo ok)"
           done
 
@@ -131,7 +131,7 @@ jobs:
             repo=$(jq -r '.repo' <<<"$row")
             pat=$(jq -r '.token // .resolved_token // empty' <<<"$row")
             if [ -z "$pat" ]; then echo "provision $repo skipped — the registry has no token for this row"; continue; fi
-            for f in .github/workflows/zen-pool.yml scripts/zen-pool-worker.mjs scripts/zen-client.mjs scripts/zen-pool-prune.mjs scripts/zen-pool-policy.mjs; do
+            for f in .github/workflows/zen-pool.yml scripts/zen-pool-worker.mjs scripts/zen-client.mjs scripts/zen-response.mjs scripts/zen-artifact.mjs scripts/zen-pool-prune.mjs scripts/zen-pool-policy.mjs; do
               # The ladder repo is the source of truth for the worker code — pull from there, not
               # from this repo, so a worker change lands in the ring on the next sync. The sweep
               # script is the exception: it is ring policy, and the ladder repo is pull-only for the
